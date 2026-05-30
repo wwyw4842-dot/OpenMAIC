@@ -392,7 +392,7 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
             const scene = actionsResult.scene;
             const settings = useSettingsStore.getState();
 
-            // TTS generation — failure means the whole scene fails
+            // TTS generation — soft failure: keep scene, skip audio, continue
             if (settings.ttsEnabled && settings.ttsProviderId !== 'browser-native-tts') {
               const ttsResult = await generateTTSForScene(
                 scene,
@@ -400,15 +400,11 @@ export function useSceneGenerator(options: UseSceneGeneratorOptions = {}) {
                 signal,
               );
               if (!ttsResult.success) {
-                if (abortRef.current || store.getState().generationEpoch !== startEpoch) {
-                  pausedByFailureOrAbort = true;
-                  break;
-                }
-                store.getState().addFailedOutline(outline);
-                options.onSceneFailed?.(outline, ttsResult.error || 'TTS generation failed');
-                store.getState().setGenerationStatus('paused');
-                pausedByFailureOrAbort = true;
-                break;
+                // Log warning but don't break — the scene itself is valid (content + actions)
+                const speechCount = (scene.actions || []).filter((a) => a.type === 'speech').length;
+                log.warn(
+                  `TTS failed for scene ${scene.order} (${ttsResult.failedCount}/${speechCount} actions), keeping scene without audio`,
+                );
               }
             }
 
