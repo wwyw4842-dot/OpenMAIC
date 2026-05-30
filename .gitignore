@@ -109,3 +109,7 @@ playwright-report/
 .DS_Store
 .claude/
 .claudian/
+
+# e2e screenshot artifacts
+e2e/screenshots/
+>>>>>>> origin/main
