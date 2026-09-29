@@ -1,6 +1,13 @@
 'use client';
 
-import { useRef, useEffect, useCallback, useMemo, useImperativeHandle, forwardRef } from 'react';
+import {
+  useRef,
+  useEffect,
+  useCallback,
+  useLayoutEffect,
+  useImperativeHandle,
+  forwardRef,
+} from 'react';
 import { debounce } from 'lodash';
 import { useKeyboardStore, useCanvasStore } from '@/lib/store';
 import type { EditorView } from 'prosemirror-view';
@@ -78,28 +85,24 @@ export const ProsemirrorEditor = forwardRef<ProsemirrorEditorRef, ProsemirrorEdi
     const setTextFormatPainter = useCanvasStore.use.setTextFormatPainter();
     const ctrlOrShiftKeyActive = useKeyboardStore((state) => state.ctrlOrShiftKeyActive());
 
-    // Handle input with debounce
+    const callbacks = useRef({ value, onUpdate });
+    const syncingContent = useRef(false);
+    const historyCommand = useRef(false);
+    useLayoutEffect(() => {
+      callbacks.current = { value, onUpdate };
+    }, [value, onUpdate]);
 
-    const handleInput = useMemo(
-      () =>
-        debounce(
-          (isHandleHistory = false) => {
-            if (!editorView.current) return;
-            if (
-              value.replace(/ style=""/g, '') ===
-              editorView.current.dom.innerHTML.replace(/ style=""/g, '')
-            )
-              return;
-            onUpdate?.({
-              value: editorView.current.dom.innerHTML,
-              ignore: isHandleHistory,
-            });
-          },
-          300,
-          { trailing: true },
-        ),
-      [value, onUpdate],
-    );
+    // Commit document changes to the owning element synchronously. A timer that
+    // reads the editor after navigation can otherwise write into another scene.
+    const handleInput = useCallback((isHandleHistory = false) => {
+      const view = editorView.current;
+      if (!view || syncingContent.current) return;
+      const html = view.dom.innerHTML;
+      if (callbacks.current.value.replace(/ style=""/g, '') === html.replace(/ style=""/g, ''))
+        return;
+      callbacks.current.onUpdate?.({ value: html, ignore: isHandleHistory });
+      callbacks.current = { ...callbacks.current, value: html };
+    }, []);
 
     // Handle focus
     const handleFocus = useCallback(() => {
@@ -143,7 +146,7 @@ export const ProsemirrorEditor = forwardRef<ProsemirrorEditorRef, ProsemirrorEdi
 
         const isHandleHistory = ctrlActive && (key === KEYS.Z || key === KEYS.Y);
 
-        handleInput(isHandleHistory);
+        historyCommand.current = isHandleHistory;
         handleClick();
       },
       [handleInput, handleClick],
@@ -395,6 +398,13 @@ export const ProsemirrorEditor = forwardRef<ProsemirrorEditorRef, ProsemirrorEdi
           mouseup: handleMouseup,
         },
         editable: () => editable,
+        dispatchTransaction(transaction) {
+          const view = editorView.current;
+          if (!view) return;
+          view.updateState(view.state.apply(transaction));
+          if (transaction.docChanged) handleInput(historyCommand.current);
+          historyCommand.current = false;
+        },
       });
 
       if (autoFocus) {
@@ -403,7 +413,9 @@ export const ProsemirrorEditor = forwardRef<ProsemirrorEditorRef, ProsemirrorEdi
 
       return () => {
         if (editorView.current) {
+          handleClick.cancel();
           editorView.current.destroy();
+          editorView.current = null;
         }
       };
       // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -412,11 +424,36 @@ export const ProsemirrorEditor = forwardRef<ProsemirrorEditorRef, ProsemirrorEdi
     // Sync content to DOM
     useEffect(() => {
       if (!editorView.current) return;
-      if (editorView.current.hasFocus()) return;
+      if (
+        value.replace(/ style=""/g, '') ===
+        editorView.current.dom.innerHTML.replace(/ style=""/g, '')
+      )
+        return;
 
       const { doc, tr } = editorView.current.state;
-      editorView.current.dispatch(tr.replaceRangeWith(0, doc.content.size, createDocument(value)));
+      syncingContent.current = true;
+      try {
+        editorView.current.dispatch(
+          tr.replaceRangeWith(0, doc.content.size, createDocument(value)),
+        );
+      } finally {
+        syncingContent.current = false;
+      }
     }, [value]);
+
+    // EditorView outlives React renders; install the current element handlers.
+    useEffect(() => {
+      editorView.current?.setProps({
+        handleDOMEvents: {
+          focus: handleFocus,
+          blur: handleBlur,
+          keydown: handleKeydown,
+          click: handleClick,
+          mouseup: handleMouseup,
+        },
+      });
+      return () => handleClick.cancel();
+    }, [handleFocus, handleBlur, handleKeydown, handleClick, handleMouseup]);
 
     // Toggle editable mode
     useEffect(() => {
