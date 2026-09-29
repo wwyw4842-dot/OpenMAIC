@@ -20,6 +20,8 @@ const log = createLogger('Database');
  */
 export interface Snapshot {
   id?: number;
+  stageId?: string;
+  sessionId?: string;
   index: number;
   slides: Scene[];
 }
@@ -194,7 +196,7 @@ export function mediaFileKey(stageId: string, elementId: string): string {
 // ==================== Database Definition ====================
 
 const DATABASE_NAME = 'MAIC-Database';
-const _DATABASE_VERSION = 10;
+const _DATABASE_VERSION = 11;
 
 /**
  * MAIC Database Instance
@@ -378,11 +380,33 @@ class MAICDatabase extends Dexie {
       generatedAgents: 'id, stageId',
       voiceProfiles: 'id, providerId, kind, updatedAt',
     });
+
+    // Version 11: Undo history is partitioned by classroom. Rows with no stageId
+    // without stageId stay intact but unindexed: never guess their classroom.
+    // Export them through exportLegacySnapshots() for explicit recovery.
+    this.version(11).stores({
+      stages: 'id, updatedAt',
+      scenes: 'id, stageId, order, [stageId+order]',
+      audioFiles: 'id, createdAt',
+      imageFiles: 'id, createdAt',
+      snapshots: '++id, stageId',
+      chatSessions: 'id, stageId, [stageId+createdAt]',
+      playbackState: 'stageId',
+      stageOutlines: 'stageId',
+      mediaFiles: 'id, stageId, [stageId+type]',
+      generatedAgents: 'id, stageId',
+      voiceProfiles: 'id, providerId, kind, updatedAt',
+    });
   }
 }
 
 // Create database instance
 export const db = new MAICDatabase();
+
+/** Old global undo rows are preserved byte-for-byte, isolated from active histories. */
+export async function exportLegacySnapshots(): Promise<Snapshot[]> {
+  return db.snapshots.filter((row) => !row.stageId).toArray();
+}
 
 // ==================== Helper Functions ====================
 
