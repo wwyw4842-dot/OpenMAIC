@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { parseAccessToken } from '@/lib/server/access-token-lifetime';
 
 /** Convert string to Uint8Array */
 function encode(str: string): Uint8Array {
@@ -14,11 +15,9 @@ function bufToHex(buf: ArrayBuffer): string {
 
 /** Verify an HMAC-signed token using Web Crypto API (Edge-compatible) */
 async function verifyToken(token: string, accessCode: string): Promise<boolean> {
-  const dotIndex = token.indexOf('.');
-  if (dotIndex === -1) return false;
-
-  const timestamp = token.substring(0, dotIndex);
-  const signature = token.substring(dotIndex + 1);
+  const parsed = parseAccessToken(token);
+  if (!parsed) return false;
+  const { timestamp, signature } = parsed;
 
   const keyData = encode(accessCode);
   const key = await crypto.subtle.importKey(
