@@ -17,6 +17,7 @@ async function seedDatabase(page: import('@playwright/test').Page) {
   // Navigate to home page first — this causes Dexie to open/create the DB at v8
   // with the correct schema. We wait for network idle to ensure Dexie is done.
   await page.goto('/', { waitUntil: 'networkidle' });
+  await page.waitForFunction(async () => (await indexedDB.databases()).some((db) => db.name === 'MAIC-Database' && Number(db.version) >= 110));
 
   // Now seed data by opening the DB at its current version (no upgrade).
   // Opening without a version number returns the current version without triggering
@@ -29,6 +30,7 @@ async function seedDatabase(page: import('@playwright/test').Page) {
 
         request.onsuccess = (event) => {
           const db = (event.target as IDBOpenDBRequest).result;
+          if (!["stages", "scenes", "stageOutlines"].every((name) => db.objectStoreNames.contains(name))) { db.close(); reject(new Error("Dexie schema is not ready")); return; }
           const tx = db.transaction(['stages', 'scenes', 'stageOutlines'], 'readwrite');
           const now = Date.now();
 
@@ -113,7 +115,8 @@ async function seedDatabase(page: import('@playwright/test').Page) {
             db.close();
             resolve();
           };
-          tx.onerror = () => reject(tx.error);
+          tx.onerror = () => { db.close(); reject(tx.error); };
+          tx.onabort = () => { db.close(); reject(tx.error || new Error("Fixture transaction aborted")); };
         };
 
         request.onerror = () => reject(request.error);
