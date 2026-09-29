@@ -7,32 +7,22 @@ import { createLogger } from '@/lib/logger';
 
 const log = createLogger('StageStore');
 
+const stageSaveTail = new Map<string, Promise<void>>();
+let loadRequestId = 0;
+
+function enqueueStageSave(stageId: string, job: () => Promise<void>): Promise<void> {
+  const previous = stageSaveTail.get(stageId) ?? Promise.resolve();
+  const current = previous.catch(() => undefined).then(job);
+  const tail = current.then(() => undefined, () => undefined);
+  stageSaveTail.set(stageId, tail);
+  void tail.then(() => {
+    if (stageSaveTail.get(stageId) === tail) stageSaveTail.delete(stageId);
+  });
+  return current;
+}
+
 /** Virtual scene ID used when the user navigates to a page still being generated */
 export const PENDING_SCENE_ID = '__pending__';
-
-// ==================== Debounce Helper ====================
-
-/**
- * Debounce function to limit how often a function is called
- * @param func Function to debounce
- * @param delay Delay in milliseconds
- */
-function debounce<T extends (...args: Parameters<T>) => ReturnType<T>>(
-  func: T,
-  delay: number,
-): (...args: Parameters<T>) => void {
-  let timeoutId: ReturnType<typeof setTimeout> | null = null;
-
-  return (...args: Parameters<T>) => {
-    if (timeoutId) {
-      clearTimeout(timeoutId);
-    }
-    timeoutId = setTimeout(() => {
-      func(...args);
-      timeoutId = null;
-    }, delay);
-  };
-}
 
 type ToolbarState = 'design' | 'ai';
 
@@ -112,6 +102,8 @@ const useStageStoreBase = create<StageState>()((set, get) => ({
 
   // Actions
   setStage: (stage) => {
+    loadRequestId += 1;
+    flushPendingSave(get().stage?.id);
     set((s) => ({
       stage,
       scenes: [],
@@ -254,21 +246,31 @@ const useStageStoreBase = create<StageState>()((set, get) => ({
       return;
     }
 
+    const stageId = stage.id;
+    if (scenes.some((scene) => scene.stageId && scene.stageId !== stageId)) {
+      const error = new Error('Refusing to save scenes that belong to another classroom');
+      log.error(error.message);
+      throw error;
+    }
+    cancelPendingSave(stageId);
+    const payload = structuredClone({ stage, scenes, currentSceneId, chats });
     try {
-      const { saveStageData } = await import('@/lib/utils/stage-storage');
-      await saveStageData(stage.id, {
-        stage,
-        scenes,
-        currentSceneId,
-        chats,
+      await enqueueStageSave(stageId, async () => {
+        const { saveStageData } = await import('@/lib/utils/stage-storage');
+        await saveStageData(stageId, payload);
       });
     } catch (error) {
       log.error('Failed to save to storage:', error);
+      throw error;
     }
   },
 
   loadFromStorage: async (stageId: string) => {
+    const requestId = ++loadRequestId;
+    const startingState = get();
+    flushPendingSave(startingState.stage?.id);
     try {
+      await stageSaveTail.get(stageId);
       // Skip IndexedDB load if the store already has this stage with scenes
       // (e.g. navigated from generation-preview with fresh in-memory data)
       const currentState = get();
@@ -285,6 +287,8 @@ const useStageStoreBase = create<StageState>()((set, get) => ({
       const outlinesRecord = await db.stageOutlines.get(stageId);
       const outlines = outlinesRecord?.outlines || [];
 
+      // Navigation or edits that happened during the read own the current UI.
+      if (requestId !== loadRequestId || get().scenes !== startingState.scenes) return;
       if (data) {
         set({
           stage: data.stage,
@@ -306,6 +310,8 @@ const useStageStoreBase = create<StageState>()((set, get) => ({
   },
 
   clearStore: () => {
+    loadRequestId += 1;
+    flushPendingSave(get().stage?.id);
     set((s) => ({
       stage: null,
       scenes: [],
@@ -330,6 +336,38 @@ export const useStageStore = createSelectors(useStageStoreBase);
  * Debounced version of saveToStorage to prevent excessive writes
  * Waits 500ms after the last change before saving
  */
-const debouncedSave = debounce(() => {
-  useStageStore.getState().saveToStorage();
-}, 500);
+const pendingSaves = new Map<string, { timer: ReturnType<typeof setTimeout>; save: () => Promise<void> }>();
+
+function cancelPendingSave(stageId: string) {
+  const pending = pendingSaves.get(stageId);
+  if (pending) clearTimeout(pending.timer);
+  pendingSaves.delete(stageId);
+}
+
+function flushPendingSave(stageId?: string) {
+  if (!stageId) return;
+  const pending = pendingSaves.get(stageId);
+  if (!pending) return;
+  cancelPendingSave(stageId);
+  void pending.save().catch((error) => log.error('Failed to flush classroom:', error));
+}
+
+function debouncedSave() {
+  const { stage, scenes, currentSceneId, chats } = useStageStore.getState();
+  if (!stage) return;
+  const stageId = stage.id;
+  const payload = structuredClone({ stage, scenes, currentSceneId, chats });
+  cancelPendingSave(stageId);
+  const save = () => enqueueStageSave(stageId, async () => {
+    if (payload.scenes.some((scene) => scene.stageId && scene.stageId !== stageId)) {
+      throw new Error('Refusing to save scenes that belong to another classroom');
+    }
+    const { saveStageData } = await import('@/lib/utils/stage-storage');
+    await saveStageData(stageId, payload);
+  });
+  const timer = setTimeout(() => {
+    pendingSaves.delete(stageId);
+    void save().catch((error) => log.error('Failed to autosave classroom:', error));
+  }, 500);
+  pendingSaves.set(stageId, { timer, save });
+}
