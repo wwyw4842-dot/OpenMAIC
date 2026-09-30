@@ -1,19 +1,32 @@
 import { create } from 'zustand';
-import type { IndexableTypeArray } from 'dexie';
 import { db, type Snapshot } from '@/lib/utils/database';
 import { useStageStore } from './stage';
 import type { Scene } from '@/lib/types/stage';
 
+const SNAPSHOT_LIMIT = 20;
+const cursors = new Map<string, number>();
+let historyTail: Promise<void> = Promise.resolve();
+function enqueueHistory(job: () => Promise<void>): Promise<void> {
+  const current = historyTail.then(job);
+  historyTail = current.catch(() => undefined);
+  return current;
+}
+function cloneScenes(scenes: Scene[]): Scene[] {
+  return structuredClone(scenes);
+}
+async function snapshotsFor(stageId: string): Promise<Snapshot[]> {
+  return db.snapshots.where('stageId').equals(stageId).sortBy('id');
+}
+function active(stageId: string, revision: number) {
+  const state = useStageStore.getState();
+  return state.stage?.id === stageId && state.editRevision === revision;
+}
 export interface SnapshotState {
-  // State
-  snapshotCursor: number; // Snapshot pointer
-  snapshotLength: number; // Snapshot count
-
-  // Computed
+  snapshotCursor: number;
+  snapshotLength: number;
+  historyStageId: string | null;
   canUndo: () => boolean;
   canRedo: () => boolean;
-
-  // Actions
   setSnapshotCursor: (cursor: number) => void;
   setSnapshotLength: (length: number) => void;
   initSnapshotDatabase: () => Promise<void>;
@@ -21,145 +34,109 @@ export interface SnapshotState {
   undo: () => Promise<void>;
   redo: () => Promise<void>;
 }
-
-/**
- * Snapshot store for undo/redo functionality
- * Based on PPTist's snapshot store, migrated to Zustand
- *
- * Uses IndexedDB (via Dexie) to store snapshot history
- */
-export const useSnapshotStore = create<SnapshotState>((set, get) => ({
-  // Initial state
-  snapshotCursor: -1,
-  snapshotLength: 0,
-
-  // Computed properties
-  canUndo: () => get().snapshotCursor > 0,
-  canRedo: () => get().snapshotCursor < get().snapshotLength - 1,
-
-  // Actions
-  setSnapshotCursor: (cursor: number) => set({ snapshotCursor: cursor }),
-  setSnapshotLength: (length: number) => set({ snapshotLength: length }),
-
-  /**
-   * Initialize snapshot database with current state
-   */
-  initSnapshotDatabase: async () => {
-    const stageStore = useStageStore.getState();
-
-    const newFirstSnapshot = {
-      index: stageStore.getSceneIndex(stageStore.currentSceneId || ''),
-      slides: JSON.parse(JSON.stringify(stageStore.scenes)),
-    };
-    await db.snapshots.add(newFirstSnapshot);
-
-    set({
-      snapshotCursor: 0,
-      snapshotLength: 1,
-    });
-  },
-
-  /**
-   * Add a new snapshot to the history
-   * Handles snapshot length limit and cursor position
-   */
-  addSnapshot: async () => {
-    const stageStore = useStageStore.getState();
-    const { snapshotCursor } = get();
-
-    // Get all snapshot IDs from IndexedDB
-    const allKeys = await db.snapshots.orderBy('id').keys();
-
-    let needDeleteKeys: IndexableTypeArray = [];
-
-    // If cursor is not at the end, delete all snapshots after cursor
-    // This happens when user undoes multiple times then performs a new action
-    if (snapshotCursor >= 0 && snapshotCursor < allKeys.length - 1) {
-      needDeleteKeys = allKeys.slice(snapshotCursor + 1);
-    }
-
-    // Add new snapshot
-    const snapshot = {
-      index: stageStore.getSceneIndex(stageStore.currentSceneId || ''),
-      slides: JSON.parse(JSON.stringify(stageStore.scenes)),
-    };
-    await db.snapshots.add(snapshot);
-
-    // Calculate new snapshot length
-    let snapshotLength = allKeys.length - needDeleteKeys.length + 1;
-
-    // Enforce snapshot length limit
-    const snapshotLengthLimit = 20;
-    if (snapshotLength > snapshotLengthLimit) {
-      needDeleteKeys.push(allKeys[0]);
-      snapshotLength--;
-    }
-
-    // Maintain page focus after undo: set the second-to-last snapshot's index to current scene
-    // https://github.com/pipipi-pikachu/PPTist/issues/27
-    if (snapshotLength >= 2) {
-      const currentSceneIndex = stageStore.getSceneIndex(stageStore.currentSceneId || '');
-      await db.snapshots.update(allKeys[snapshotLength - 2] as number, {
-        index: currentSceneIndex,
+export const useSnapshotStore = create<SnapshotState>((set, get) => {
+  const move = (delta: number) => {
+    const request = useStageStore.getState();
+    const stageId = request.stage?.id;
+    if (!stageId) return Promise.resolve();
+    return enqueueHistory(async () => {
+      if (!active(stageId, request.editRevision) || get().historyStageId !== stageId) return;
+      const rows = await snapshotsFor(stageId);
+      if (!active(stageId, request.editRevision)) return;
+      const cursor = (cursors.get(stageId) ?? get().snapshotCursor) + delta;
+      const snapshot = rows[cursor];
+      if (!snapshot || snapshot.slides.some((scene) => scene.stageId && scene.stageId !== stageId))
+        return;
+      const sceneIndex = Math.max(0, Math.min(snapshot.index, snapshot.slides.length - 1));
+      // History navigation is serialized separately from edits. Do not increment
+      // editRevision here: queued consecutive undo commands must remain ordered.
+      useStageStore.setState({
+        scenes: cloneScenes(snapshot.slides),
+        currentSceneId: snapshot.slides[sceneIndex]?.id ?? null,
       });
-    }
-
-    // Delete obsolete snapshots
-    await db.snapshots.bulkDelete(needDeleteKeys as number[]);
-
-    set({
-      snapshotCursor: snapshotLength - 1,
-      snapshotLength,
+      cursors.set(stageId, cursor);
+      set({ snapshotCursor: cursor, snapshotLength: rows.length });
+      await useStageStore.getState().saveToStorage();
     });
-  },
-
-  /**
-   * Undo: restore previous snapshot
-   */
-  undo: async () => {
-    const { snapshotCursor } = get();
-    if (snapshotCursor <= 0) return;
-
-    const stageStore = useStageStore.getState();
-
-    const newSnapshotCursor = snapshotCursor - 1;
-    const snapshots: Snapshot[] = await db.snapshots.orderBy('id').toArray();
-    const snapshot = snapshots[newSnapshotCursor];
-    const { index, slides } = snapshot;
-
-    const sceneIndex = index > slides.length - 1 ? slides.length - 1 : index;
-
-    // Restore scenes and current scene
-    stageStore.setScenes(slides as unknown as Scene[]); // Type assertion needed due to Slide vs Scene difference
-    if (slides[sceneIndex]) {
-      stageStore.setCurrentSceneId(slides[sceneIndex].id);
-    }
-
-    set({ snapshotCursor: newSnapshotCursor });
-  },
-
-  /**
-   * Redo: restore next snapshot
-   */
-  redo: async () => {
-    const { snapshotCursor, snapshotLength } = get();
-    if (snapshotCursor >= snapshotLength - 1) return;
-
-    const stageStore = useStageStore.getState();
-
-    const newSnapshotCursor = snapshotCursor + 1;
-    const snapshots: Snapshot[] = await db.snapshots.orderBy('id').toArray();
-    const snapshot = snapshots[newSnapshotCursor];
-    const { index, slides } = snapshot;
-
-    const sceneIndex = index > slides.length - 1 ? slides.length - 1 : index;
-
-    // Restore scenes and current scene
-    stageStore.setScenes(slides as unknown as Scene[]); // Type assertion needed due to Slide vs Scene difference
-    if (slides[sceneIndex]) {
-      stageStore.setCurrentSceneId(slides[sceneIndex].id);
-    }
-
-    set({ snapshotCursor: newSnapshotCursor });
-  },
-}));
+  };
+  return {
+    snapshotCursor: -1,
+    snapshotLength: 0,
+    historyStageId: null,
+    canUndo: () =>
+      get().historyStageId === useStageStore.getState().stage?.id && get().snapshotCursor > 0,
+    canRedo: () =>
+      get().historyStageId === useStageStore.getState().stage?.id &&
+      get().snapshotCursor < get().snapshotLength - 1,
+    setSnapshotCursor: (cursor) => {
+      const id = get().historyStageId;
+      if (id) cursors.set(id, cursor);
+      set({ snapshotCursor: cursor });
+    },
+    setSnapshotLength: (snapshotLength) => set({ snapshotLength }),
+    initSnapshotDatabase: () => {
+      const request = useStageStore.getState();
+      const stageId = request.stage?.id;
+      if (!stageId) return Promise.resolve();
+      const slides = cloneScenes(request.scenes);
+      return enqueueHistory(async () => {
+        let rows: Snapshot[] = [];
+        await db.transaction('rw', db.snapshots, async () => {
+          rows = await snapshotsFor(stageId);
+          if (!rows.length) {
+            const first = {
+              stageId,
+              sessionId: stageId,
+              index: request.getSceneIndex(request.currentSceneId || ''),
+              slides,
+            };
+            const id = await db.snapshots.add(first);
+            rows = [{ ...first, id }];
+            cursors.set(stageId, 0);
+          }
+        });
+        if (!active(stageId, request.editRevision)) return;
+        const cursor = Math.min(cursors.get(stageId) ?? rows.length - 1, rows.length - 1);
+        cursors.set(stageId, cursor);
+        set({ historyStageId: stageId, snapshotCursor: cursor, snapshotLength: rows.length });
+      });
+    },
+    addSnapshot: () => {
+      const request = useStageStore.getState();
+      const stageId = request.stage?.id;
+      if (!stageId) return Promise.resolve();
+      const slides = cloneScenes(request.scenes);
+      const index = request.getSceneIndex(request.currentSceneId || '');
+      return enqueueHistory(async () => {
+        let length = 0;
+        await db.transaction('rw', db.snapshots, async () => {
+          const rows = await snapshotsFor(stageId);
+          const cursor = Math.min(cursors.get(stageId) ?? rows.length - 1, rows.length - 1);
+          const removed = rows
+            .slice(cursor + 1)
+            .flatMap((row) => (row.id === undefined ? [] : [row.id]));
+          const kept = rows.slice(0, cursor + 1);
+          while (kept.length >= SNAPSHOT_LIMIT) {
+            const oldest = kept.shift();
+            if (oldest?.id !== undefined) removed.push(oldest.id);
+          }
+          if (removed.length) await db.snapshots.bulkDelete(removed);
+          const previous = kept.at(-1);
+          if (previous?.id !== undefined) await db.snapshots.update(previous.id, { index });
+          await db.snapshots.add({
+            stageId,
+            sessionId: rows[0]?.sessionId ?? stageId,
+            index,
+            slides,
+          });
+          length = kept.length + 1;
+        });
+        cursors.set(stageId, length - 1);
+        if (useStageStore.getState().stage?.id === stageId)
+          set({ historyStageId: stageId, snapshotCursor: length - 1, snapshotLength: length });
+      });
+    },
+    undo: () => move(-1),
+    redo: () => move(1),
+  };
+});

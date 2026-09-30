@@ -6,6 +6,7 @@
  */
 
 import { Stage, Scene } from '../types/stage';
+import type { SceneOutline } from '../types/generation';
 import { ChatSession } from '../types/chat';
 import { db } from './database';
 import { saveChatSessions, loadChatSessions, deleteChatSessions } from './chat-storage';
@@ -20,6 +21,7 @@ export interface StageStoreData {
   scenes: Scene[];
   currentSceneId: string | null;
   chats: ChatSession[];
+  outlines?: SceneOutline[];
 }
 
 export interface StageListItem {
@@ -39,41 +41,58 @@ export async function saveStageData(stageId: string, data: StageStoreData): Prom
   try {
     const now = Date.now();
 
-    // Save to stages table
-    await db.stages.put({
-      id: stageId,
-      name: data.stage.name || 'Untitled Stage',
-      description: data.stage.description,
-      createdAt: data.stage.createdAt || now,
-      updatedAt: now,
-      languageDirective: data.stage.languageDirective,
-      style: data.stage.style,
-      currentSceneId: data.currentSceneId || undefined,
-      agentIds: data.stage.agentIds,
-      videoManifest: data.stage.videoManifest,
-      interactiveMode: data.stage.interactiveMode,
-    });
+    // One transaction so a quota failure cannot delete scenes and then abort.
+    // saveChatSessions opens a nested transaction on chatSessions only; Dexie
+    // joins it to this one and rolls the classroom back together.
+    await db.transaction(
+      'rw',
+      db.stages,
+      db.scenes,
+      db.chatSessions,
+      db.stageOutlines,
+      async () => {
+        await db.stages.put({
+          id: stageId,
+          name: data.stage.name || 'Untitled Stage',
+          description: data.stage.description,
+          createdAt: data.stage.createdAt || now,
+          updatedAt: now,
+          languageDirective: data.stage.languageDirective,
+          style: data.stage.style,
+          currentSceneId: data.currentSceneId || undefined,
+          agentIds: data.stage.agentIds,
+          videoManifest: data.stage.videoManifest,
+          interactiveMode: data.stage.interactiveMode,
+        });
 
-    // Delete old scenes first to avoid orphaned data
-    await db.scenes.where('stageId').equals(stageId).delete();
+        await db.scenes.where('stageId').equals(stageId).delete();
 
-    // Save new scenes
-    if (data.scenes && data.scenes.length > 0) {
-      await db.scenes.bulkPut(
-        data.scenes.map((scene, index) => ({
-          ...scene,
-          stageId,
-          order: scene.order ?? index,
-          createdAt: scene.createdAt || now,
-          updatedAt: scene.updatedAt || now,
-        })),
-      );
-    }
+        if (data.scenes && data.scenes.length > 0) {
+          await db.scenes.bulkPut(
+            data.scenes.map((scene, index) => ({
+              ...scene,
+              stageId,
+              order: scene.order ?? index,
+              createdAt: scene.createdAt || now,
+              updatedAt: scene.updatedAt || now,
+            })),
+          );
+        }
 
-    // Save chat sessions to independent table
-    if (data.chats) {
-      await saveChatSessions(stageId, data.chats);
-    }
+        if (data.outlines) {
+          await db.stageOutlines.put({
+            stageId,
+            outlines: data.outlines,
+            createdAt: data.stage.createdAt || now,
+            updatedAt: now,
+          });
+        }
+
+        if (data.chats) {
+          await saveChatSessions(stageId, data.chats);
+        }
+      },
+    );
 
     log.info(`Saved stage: ${stageId}`);
   } catch (error) {

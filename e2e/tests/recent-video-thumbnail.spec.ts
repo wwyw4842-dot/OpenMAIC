@@ -30,6 +30,7 @@ async function seedVideoThumbnailStage({
   extraStoredMediaRefs?: string[];
 }) {
   await page.goto('/', { waitUntil: 'networkidle' });
+  await page.waitForFunction(async () => (await indexedDB.databases()).some((db) => db.name === 'MAIC-Database' && Number(db.version) >= 110));
 
   await page.evaluate(
     ({
@@ -47,6 +48,7 @@ async function seedVideoThumbnailStage({
 
         request.onsuccess = (event) => {
           const db = (event.target as IDBOpenDBRequest).result;
+          if (!["stages", "scenes", "stageOutlines"].every((name) => db.objectStoreNames.contains(name))) { db.close(); reject(new Error("Dexie schema is not ready")); return; }
           const tx = db.transaction(
             ['stages', 'scenes', 'stageOutlines', 'mediaFiles'],
             'readwrite',
@@ -138,7 +140,8 @@ async function seedVideoThumbnailStage({
             db.close();
             resolve();
           };
-          tx.onerror = () => reject(tx.error);
+          tx.onerror = () => { db.close(); reject(tx.error); };
+          tx.onabort = () => { db.close(); reject(tx.error || new Error("Fixture transaction aborted")); };
         };
 
         request.onerror = () => reject(request.error);
@@ -157,6 +160,7 @@ async function seedVideoThumbnailStage({
   );
 
   await page.goto('/', { waitUntil: 'networkidle' });
+  await page.waitForFunction(async () => (await indexedDB.databases()).some((db) => db.name === 'MAIC-Database' && Number(db.version) >= 110));
 }
 
 test.describe('Home recent video thumbnails', () => {
