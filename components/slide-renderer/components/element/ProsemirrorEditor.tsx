@@ -11,6 +11,7 @@ import {
 import { debounce } from 'lodash';
 import { useKeyboardStore, useCanvasStore } from '@/lib/store';
 import type { EditorView } from 'prosemirror-view';
+import { EditorState } from 'prosemirror-state';
 import { toggleMark, wrapIn, lift } from 'prosemirror-commands';
 import { initProsemirrorEditor, createDocument } from '@/lib/prosemirror';
 import {
@@ -430,11 +431,16 @@ export const ProsemirrorEditor = forwardRef<ProsemirrorEditorRef, ProsemirrorEdi
       )
         return;
 
-      const { doc, tr } = editorView.current.state;
       syncingContent.current = true;
       try {
-        editorView.current.dispatch(
-          tr.replaceRangeWith(0, doc.content.size, createDocument(value)),
+        // External snapshots and owner changes establish a new document. Keep
+        // plugins but reset their history so Ctrl-Z cannot resurrect a document
+        // that the classroom undo has already replaced.
+        editorView.current.updateState(
+          EditorState.create({
+            doc: createDocument(value),
+            plugins: editorView.current.state.plugins,
+          }),
         );
       } finally {
         syncingContent.current = false;
