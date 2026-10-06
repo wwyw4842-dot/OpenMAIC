@@ -105,7 +105,9 @@ export function CanvasArea({
         >
           {/* Whiteboard Layer */}
           <div className="absolute inset-0 z-[110] pointer-events-none">
-            <SceneProvider>
+            <SceneProvider
+              key={`whiteboard:${currentScene?.stageId || 'none'}:${currentScene?.id || 'none'}`}
+            >
               <Whiteboard isOpen={whiteboardOpen} onClose={onWhiteboardClose} />
             </SceneProvider>
           </div>
@@ -113,7 +115,7 @@ export function CanvasArea({
           {/* Scene Content */}
           {currentScene && !whiteboardOpen && (
             <div className="absolute inset-0">
-              <SceneProvider>
+              <SceneProvider key={`${currentScene.stageId}:${currentScene.id}`}>
                 <SceneRenderer scene={currentScene} mode={mode} />
               </SceneProvider>
             </div>
