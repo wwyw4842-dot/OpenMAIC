@@ -22,6 +22,7 @@ vi.mock('@/lib/prosemirror', async (importOriginal) => {
 // Store, callbacks, ProseMirror document/history, and DOM are real.
 vi.mock('@/components/whiteboard', () => ({ Whiteboard: () => null }));
 vi.mock('@/components/canvas/canvas-toolbar', () => ({ CanvasToolbar: () => null }));
+vi.mock('@/lib/hooks/use-i18n', () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 vi.mock('@/components/stage/scene-renderer', () => ({ SceneRenderer: () => <OwningEditor /> }));
 function OwningEditor() {
   const { sceneData, updateSceneData } = useSceneData<SlideContent>();
@@ -40,7 +41,7 @@ function Host() {
 function scene(id: string, stageId: string, content: string): Scene {
   return { id, stageId, type:'slide', title:id, order:0, createdAt:1, updatedAt:1,
     content:{type:'slide',canvas:{id:'slide', viewportSize:1000,viewportRatio:0.5625,theme:defaultTheme,
-      elements:[{type:'text',id:'shared-text-id',content,left:0,top:0,width:100,height:100,defaultColor:'#000',defaultFontName:'Arial'}]}} };
+      elements:[{type:'text',id:'shared-text-id',content,left:0,top:0,width:100,height:100,rotate:0,defaultColor:'#000',defaultFontName:'Arial'}]}} };
 }
 let root: Root | undefined;
 let host: HTMLDivElement | undefined;
