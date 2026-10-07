@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { useStageStore } from '@/lib/store';
 import { PENDING_SCENE_ID } from '@/lib/store/stage';
+import { useSnapshotStore } from '@/lib/store/snapshot';
 import { useCanvasStore } from '@/lib/store/canvas';
 import { useSettingsStore } from '@/lib/store/settings';
 import { useI18n } from '@/lib/hooks/use-i18n';
@@ -57,6 +58,18 @@ export function Stage({
     outlines,
   } = useStageStore();
   const failedOutlines = useStageStore.use.failedOutlines();
+  const stageId = useStageStore((state) => state.stage?.id);
+  const historyReady = scenes.length > 0 || outlines.length === 0;
+
+  useEffect(() => {
+    if (!stageId || !historyReady) return;
+    void useSnapshotStore
+      .getState()
+      .initSnapshotDatabase()
+      .catch((error) => {
+        console.error('Failed to initialize classroom history:', error);
+      });
+  }, [stageId, historyReady]);
 
   const currentScene = getCurrentScene();
 

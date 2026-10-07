@@ -197,7 +197,9 @@ test.describe('Classroom Interaction', () => {
       return record;
     }, TEST_STAGE_ID);
     await classroom.clickScene(1);
-    await expect(page.getByRole('alert').filter({ hasText: /尚未|could not be saved/ })).toContainText(/尚未|could not be saved/);
+    await expect(
+      page.getByRole('alert').filter({ hasText: /尚未|could not be saved/ }),
+    ).toContainText(/尚未|could not be saved/);
     const readStage = () =>
       page.evaluate(async (stageId) => {
         const database = await new Promise<IDBDatabase>((resolve, reject) => {
@@ -221,9 +223,81 @@ test.describe('Classroom Interaction', () => {
     expect((await readStage()).scenes).toHaveLength(3);
     await page.evaluate(() => (window as unknown as { restorePut: () => void }).restorePut());
     await page.getByRole('button', { name: /重试保存|重試儲存|Retry saving/ }).click();
-    await expect(page.getByRole('alert').filter({ hasText: /尚未|could not be saved/ })).toBeHidden();
+    await expect(
+      page.getByRole('alert').filter({ hasText: /尚未|could not be saved/ }),
+    ).toBeHidden();
     expect((await readStage()).stage.currentSceneId).toBe('scene-1');
     await page.reload();
     await expect(page.getByRole('heading', { name: '光反应' })).toBeVisible();
+  });
+
+  test('server classroom hydration autosaves its scenes before reload', async ({ page }) => {
+    const stageId = 'server-hydration-stage';
+    const now = Date.now();
+    const classroom = {
+      stage: { id: stageId, name: 'Server classroom', createdAt: now, updatedAt: now },
+      scenes: [
+        {
+          id: 'server-hydration-scene',
+          stageId,
+          type: 'slide',
+          title: 'Server scene',
+          order: 0,
+          content: {
+            type: 'slide',
+            canvas: {
+              id: 'server-slide',
+              viewportSize: 1000,
+              viewportRatio: 0.5625,
+              theme: defaultTheme,
+              elements: [
+                {
+                  type: 'text',
+                  id: 'server-text',
+                  content: '<p>Server content</p>',
+                  left: 50,
+                  top: 50,
+                  width: 900,
+                  height: 100,
+                },
+              ],
+            },
+          },
+          createdAt: now,
+          updatedAt: now,
+        },
+      ],
+    };
+    let serverLoads = 0;
+    await page.route(`**/api/classroom?id=${stageId}`, async (route) => {
+      serverLoads += 1;
+      await route.fulfill({ json: { success: true, classroom } });
+    });
+    await page.goto(`/classroom/${stageId}`);
+    await expect(page.locator('[data-testid="scene-item"]')).toHaveCount(1);
+    await expect
+      .poll(() =>
+        page.evaluate(async (id) => {
+          const database = await new Promise<IDBDatabase>((resolve, reject) => {
+            const request = indexedDB.open('MAIC-Database');
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error);
+          });
+          const scenes = await new Promise<Array<{ stageId: string; title: string }>>(
+            (resolve, reject) => {
+              const request = database.transaction('scenes').objectStore('scenes').getAll();
+              request.onsuccess = () => resolve(request.result);
+              request.onerror = () => reject(request.error);
+            },
+          );
+          database.close();
+          return scenes.filter((scene) => scene.stageId === id).map((scene) => scene.title);
+        }, stageId),
+      )
+      .toEqual(['Server scene']);
+    await page.reload();
+    await expect(page.locator('[data-testid="scene-item"]')).toHaveCount(1);
+    await expect(page.getByRole('heading', { name: 'Server scene' })).toBeVisible();
+    expect(serverLoads).toBe(1);
   });
 });

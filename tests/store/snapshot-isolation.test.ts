@@ -215,3 +215,230 @@ test('v10 unowned history survives upgrade and is explicitly exportable', async 
   expect(useSnapshotStore.getState().canUndo()).toBe(false);
   expect(await exportLegacySnapshots()).toEqual([original]);
 });
+
+test('an initialization queued before the first edit keeps its original baseline', async () => {
+  useStageStore.setState(classroom('A', 'zero'));
+  const initializing = useSnapshotStore.getState().initSnapshotDatabase();
+  useStageStore.getState().updateScene('A-scene', { title: 'one' });
+  const appending = useSnapshotStore.getState().addSnapshot();
+  await Promise.all([initializing, appending]);
+  await useSnapshotStore.getState().undo();
+  expect(useStageStore.getState().scenes[0].title).toBe('zero');
+  expect((await loadStageData('A'))?.scenes[0].title).toBe('zero');
+  expect((await db.stages.get('A'))?.snapshotCursor).toBe(0);
+});
+
+test('old stage metadata infers the saved undo position instead of the redo tail', async () => {
+  useStageStore.setState(classroom('A', 'zero'));
+  await useSnapshotStore.getState().initSnapshotDatabase();
+  for (const title of ['one', 'two']) {
+    useStageStore.setState(classroom('A', title));
+    await useSnapshotStore.getState().addSnapshot();
+  }
+  await useSnapshotStore.getState().undo();
+  const record = (await db.stages.get('A'))!;
+  const { snapshotCursor: _cursor, snapshotSessionId: _session, ...legacy } = record;
+  await db.stages.put(legacy);
+  useSnapshotStore.setState({ historyStageId: null, snapshotCursor: -1, snapshotLength: 0 });
+  await useSnapshotStore.getState().initSnapshotDatabase();
+  expect(useSnapshotStore.getState().snapshotCursor).toBe(1);
+  useStageStore.getState().updateScene('A-scene', { title: 'branch' });
+  await useSnapshotStore.getState().addSnapshot();
+  await useSnapshotStore.getState().undo();
+  expect(useStageStore.getState().scenes[0].title).toBe('one');
+  expect((await db.snapshots.toArray()).map((row) => row.slides[0].title)).toEqual([
+    'zero',
+    'one',
+    'branch',
+  ]);
+});
+
+test('unmatched older history survives while the saved content starts a safe session', async () => {
+  useStageStore.setState(classroom('A', 'old zero'));
+  await useSnapshotStore.getState().initSnapshotDatabase();
+  useStageStore.setState(classroom('A', 'old two'));
+  await useSnapshotStore.getState().addSnapshot();
+  const oldRows = await db.snapshots.toArray();
+  const record = (await db.stages.get('A'))!;
+  const { snapshotCursor: _cursor, snapshotSessionId: _session, ...legacy } = record;
+  await db.stages.put(legacy);
+  await saveStageData('A', classroom('A', 'unmatched saved content'));
+  useStageStore.setState(classroom('A', 'unmatched saved content'));
+  useSnapshotStore.setState({ historyStageId: null, snapshotCursor: -1, snapshotLength: 0 });
+  await useSnapshotStore.getState().initSnapshotDatabase();
+  expect(useSnapshotStore.getState().canUndo()).toBe(false);
+  expect(useSnapshotStore.getState().snapshotLength).toBe(1);
+  expect((await db.snapshots.toArray()).slice(0, oldRows.length)).toEqual(oldRows);
+  useStageStore.getState().updateScene('A-scene', { title: 'safe branch' });
+  await useSnapshotStore.getState().addSnapshot();
+  await useSnapshotStore.getState().undo();
+  expect(useStageStore.getState().scenes[0].title).toBe('unmatched saved content');
+  expect((await db.snapshots.toArray()).slice(0, oldRows.length)).toEqual(oldRows);
+});
+
+test('undo scene write failure preserves both durable and visible content and cursor', async () => {
+  useStageStore.setState(classroom('A', 'zero'));
+  await useSnapshotStore.getState().initSnapshotDatabase();
+  useStageStore.setState(classroom('A', 'one'));
+  await useSnapshotStore.getState().addSnapshot();
+  const before = await db.stages.get('A');
+  const spy = vi
+    .spyOn(db.scenes, 'bulkPut')
+    .mockRejectedValueOnce(new DOMException('Undo disk full', 'QuotaExceededError'));
+  try {
+    await expect(useSnapshotStore.getState().undo()).rejects.toThrow('Undo disk full');
+  } finally {
+    spy.mockRestore();
+  }
+  expect(useStageStore.getState().scenes[0].title).toBe('one');
+  expect(useSnapshotStore.getState().snapshotCursor).toBe(1);
+  expect(await db.stages.get('A')).toEqual(before);
+  expect((await loadStageData('A'))?.scenes[0].title).toBe('one');
+  await useSnapshotStore.getState().undo();
+  expect(useStageStore.getState().scenes[0].title).toBe('zero');
+  expect((await db.stages.get('A'))?.snapshotCursor).toBe(0);
+});
+
+test('metadata failure after appending a snapshot rolls back all history mutations', async () => {
+  useStageStore.setState(classroom('A', 'zero'));
+  await useSnapshotStore.getState().initSnapshotDatabase();
+  useStageStore.setState(classroom('A', 'one'));
+  await useSnapshotStore.getState().addSnapshot();
+  await useSnapshotStore.getState().undo();
+  const rows = await db.snapshots.toArray();
+  const record = await db.stages.get('A');
+  const spy = vi
+    .spyOn(db.stages, 'put')
+    .mockRejectedValueOnce(new DOMException('Metadata disk full', 'QuotaExceededError'));
+  useStageStore.setState(classroom('A', 'failed branch'));
+  try {
+    await expect(useSnapshotStore.getState().addSnapshot()).rejects.toThrow('Metadata disk full');
+  } finally {
+    spy.mockRestore();
+  }
+  expect(await db.snapshots.toArray()).toEqual(rows);
+  expect(await db.stages.get('A')).toEqual(record);
+  expect((await loadStageData('A'))?.scenes[0].title).toBe('zero');
+  expect(useSnapshotStore.getState().snapshotCursor).toBe(0);
+  expect(useSnapshotStore.getState().canRedo()).toBe(true);
+  await useSnapshotStore.getState().redo();
+  expect(useStageStore.getState().scenes[0].title).toBe('one');
+});
+
+test('initialization cannot overwrite an explicitly saved newer edit', async () => {
+  useStageStore.setState(classroom('A', 'zero'));
+  await useStageStore.getState().saveToStorage();
+  const initializing = useSnapshotStore.getState().initSnapshotDatabase();
+  useStageStore.getState().updateScene('A-scene', { title: 'newer saved edit' });
+  const saving = useStageStore.getState().saveToStorage();
+  await Promise.all([initializing, saving]);
+  expect((await loadStageData('A'))?.scenes[0].title).toBe('newer saved edit');
+  expect((await db.snapshots.toArray())[0].slides[0].title).toBe('zero');
+});
+
+test('initialization leaves a newer pending autosave available', async () => {
+  useStageStore.setState(classroom('A', 'zero'));
+  const initializing = useSnapshotStore.getState().initSnapshotDatabase();
+  useStageStore.getState().updateScene('A-scene', { title: 'newer pending edit' });
+  await initializing;
+  await vi.waitFor(async () => {
+    expect((await loadStageData('A'))?.scenes[0].title).toBe('newer pending edit');
+  });
+  expect((await db.snapshots.toArray())[0].slides[0].title).toBe('zero');
+});
+
+test('failed history append can retry its body and undo point together', async () => {
+  useStageStore.setState(classroom('A', 'zero'));
+  await useSnapshotStore.getState().initSnapshotDatabase();
+  useStageStore.getState().updateScene('A-scene', { title: 'one' });
+  const spy = vi.spyOn(db.stages, 'put').mockRejectedValueOnce(new Error('append quota'));
+  try {
+    await expect(useSnapshotStore.getState().addSnapshot()).rejects.toThrow('append quota');
+  } finally {
+    spy.mockRestore();
+  }
+  expect(useStageStore.getState().failedSaveStageIds).toContain('A');
+  expect((await loadStageData('A'))?.scenes[0].title).toBe('zero');
+  await useStageStore.getState().retryFailedSaves();
+  expect(useStageStore.getState().failedSaveStageIds).not.toContain('A');
+  expect((await loadStageData('A'))?.scenes[0].title).toBe('one');
+  expect(useSnapshotStore.getState().snapshotCursor).toBe(1);
+  expect((await db.snapshots.toArray()).map((row) => row.slides[0].title)).toEqual(['zero', 'one']);
+  await useSnapshotStore.getState().undo();
+  expect(useStageStore.getState().scenes[0].title).toBe('zero');
+});
+
+test('failed undo retries publish only after the durable cursor and body commit', async () => {
+  useStageStore.setState(classroom('A', 'zero'));
+  await useSnapshotStore.getState().initSnapshotDatabase();
+  useStageStore.getState().updateScene('A-scene', { title: 'one' });
+  await useSnapshotStore.getState().addSnapshot();
+  const spy = vi.spyOn(db.scenes, 'bulkPut').mockRejectedValueOnce(new Error('undo quota'));
+  try {
+    await expect(useSnapshotStore.getState().undo()).rejects.toThrow('undo quota');
+  } finally {
+    spy.mockRestore();
+  }
+  expect(useStageStore.getState().failedSaveStageIds).toContain('A');
+  expect(useStageStore.getState().scenes[0].title).toBe('one');
+  await useStageStore.getState().retryFailedSaves();
+  expect(useStageStore.getState().failedSaveStageIds).not.toContain('A');
+  expect(useStageStore.getState().scenes[0].title).toBe('zero');
+  expect((await loadStageData('A'))?.scenes[0].title).toBe('zero');
+  expect(useSnapshotStore.getState().snapshotCursor).toBe(0);
+});
+
+test('an older queued snapshot cannot overwrite a newer explicit save', async () => {
+  useStageStore.setState(classroom('A', 'zero'));
+  await useSnapshotStore.getState().initSnapshotDatabase();
+  useStageStore.getState().updateScene('A-scene', { title: 'snapshot edit' });
+  const appending = useSnapshotStore.getState().addSnapshot();
+  useStageStore.getState().updateScene('A-scene', { title: 'newer saved edit' });
+  const saving = useStageStore.getState().saveToStorage();
+  await Promise.all([appending, saving]);
+  expect((await loadStageData('A'))?.scenes[0].title).toBe('newer saved edit');
+  expect((await db.snapshots.toArray()).map((row) => row.slides[0].title)).toEqual([
+    'zero',
+    'snapshot edit',
+  ]);
+});
+
+// Keep the real module restart last: it intentionally discards the process-local stores.
+test('module restart after undo and explicit save branches from the durable cursor', async () => {
+  useStageStore.setState(classroom('reload-history', 'zero'));
+  await useSnapshotStore.getState().initSnapshotDatabase();
+  for (const title of ['one', 'two']) {
+    useStageStore.setState(classroom('reload-history', title));
+    await useSnapshotStore.getState().addSnapshot();
+  }
+  await useSnapshotStore.getState().undo();
+  await useStageStore.getState().saveToStorage();
+  expect((await db.stages.get('reload-history'))?.snapshotCursor).toBe(1);
+  db.close();
+  vi.resetModules();
+  const { db: freshDb } = await import('@/lib/utils/database');
+  const { useStageStore: freshStage } = await import('@/lib/store/stage');
+  const { useSnapshotStore: freshHistory } = await import('@/lib/store/snapshot');
+  try {
+    await freshStage.getState().loadFromStorage('reload-history');
+    expect(freshStage.getState().scenes[0].title).toBe('one');
+    await freshHistory.getState().initSnapshotDatabase();
+    expect(freshHistory.getState().snapshotCursor).toBe(1);
+    expect(freshHistory.getState().canRedo()).toBe(true);
+    freshStage.getState().updateScene('reload-history-scene', { title: 'branch' });
+    await freshHistory.getState().addSnapshot();
+    expect(freshHistory.getState().canRedo()).toBe(false);
+    expect((await freshDb.snapshots.toArray()).map((row) => row.slides[0].title)).toEqual([
+      'zero',
+      'one',
+      'branch',
+    ]);
+    await freshHistory.getState().undo();
+    expect(freshStage.getState().scenes[0].title).toBe('one');
+    expect((await freshDb.scenes.toArray())[0].title).toBe('one');
+    expect((await freshDb.stages.get('reload-history'))?.snapshotCursor).toBe(1);
+  } finally {
+    freshDb.close();
+    await db.open();
+  }
+});

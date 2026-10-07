@@ -52,6 +52,8 @@ export interface StageRecord {
   agentIds?: string[]; // Agent IDs selected at creation time
   videoManifest?: VideoManifest; // Generated video request manifest; non-indexed
   interactiveMode?: boolean; // Interactive Mode flag; non-indexed
+  snapshotCursor?: number; // Current undo position; non-indexed and optional for older records
+  snapshotSessionId?: string; // Active history session; older unmatched history remains recoverable
 }
 
 /**

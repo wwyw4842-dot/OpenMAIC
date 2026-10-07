@@ -31,7 +31,7 @@ export function PBLRenderer({ content, mode: _mode, sceneId }: PBLRendererProps)
             }
           : scene,
       );
-      useStageStore.setState({ scenes: updatedScenes });
+      useStageStore.getState().setScenes(updatedScenes);
     },
     [sceneId],
   );

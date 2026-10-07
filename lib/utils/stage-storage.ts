@@ -22,7 +22,14 @@ export interface StageStoreData {
   currentSceneId: string | null;
   chats: ChatSession[];
   outlines?: SceneOutline[];
+  snapshotCursor?: number;
+  snapshotSessionId?: string;
 }
+
+/** Runs inside the same transaction as the classroom payload. False cancels a stale request. */
+export type StageHistoryWrite = (
+  data: StageStoreData,
+) => Promise<boolean | { metadataOnly: true } | void>;
 
 export interface StageListItem {
   id: string;
@@ -37,20 +44,39 @@ export interface StageListItem {
 /**
  * Save stage data to IndexedDB
  */
-export async function saveStageData(stageId: string, data: StageStoreData): Promise<void> {
+export async function saveStageData(
+  stageId: string,
+  data: StageStoreData,
+  writeHistory?: StageHistoryWrite,
+): Promise<void> {
   try {
     const now = Date.now();
+    let saved = false;
 
     // One transaction so a quota failure cannot delete scenes and then abort.
     // saveChatSessions opens a nested transaction on chatSessions only; Dexie
     // joins it to this one and rolls the classroom back together.
     await db.transaction(
       'rw',
-      db.stages,
-      db.scenes,
-      db.chatSessions,
-      db.stageOutlines,
+      [
+        db.stages,
+        db.scenes,
+        db.chatSessions,
+        db.stageOutlines,
+        ...(writeHistory ? [db.snapshots] : []),
+      ],
       async () => {
+        const historyResult = await writeHistory?.(data);
+        if (historyResult === false) return;
+        const previous = await db.stages.get(stageId);
+        if (previous && typeof historyResult === 'object' && historyResult.metadataOnly) {
+          await db.stages.update(stageId, {
+            snapshotCursor: data.snapshotCursor,
+            snapshotSessionId: data.snapshotSessionId,
+          });
+          saved = true;
+          return;
+        }
         await db.stages.put({
           id: stageId,
           name: data.stage.name || 'Untitled Stage',
@@ -63,6 +89,8 @@ export async function saveStageData(stageId: string, data: StageStoreData): Prom
           agentIds: data.stage.agentIds,
           videoManifest: data.stage.videoManifest,
           interactiveMode: data.stage.interactiveMode,
+          snapshotCursor: data.snapshotCursor ?? previous?.snapshotCursor,
+          snapshotSessionId: data.snapshotSessionId ?? previous?.snapshotSessionId,
         });
 
         await db.scenes.where('stageId').equals(stageId).delete();
@@ -91,10 +119,11 @@ export async function saveStageData(stageId: string, data: StageStoreData): Prom
         if (data.chats) {
           await saveChatSessions(stageId, data.chats);
         }
+        saved = true;
       },
     );
 
-    log.info(`Saved stage: ${stageId}`);
+    if (saved) log.info(`Saved stage: ${stageId}`);
   } catch (error) {
     log.error('Failed to save stage:', error);
     throw error;

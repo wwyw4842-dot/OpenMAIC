@@ -4,7 +4,14 @@ import { createSelectors } from '@/lib/utils/create-selectors';
 import type { ChatSession } from '@/lib/types/chat';
 import type { SceneOutline } from '@/lib/types/generation';
 import { createLogger } from '@/lib/logger';
-import type { StageStoreData } from '@/lib/utils/stage-storage';
+import type { StageStoreData, StageHistoryWrite } from '@/lib/utils/stage-storage';
+
+interface StageSaveOptions {
+  payload?: StageStoreData;
+  writeHistory?: StageHistoryWrite;
+  cancelPending?: boolean;
+  onCommitted?: (data: StageStoreData) => void;
+}
 
 const log = createLogger('StageStore');
 
@@ -63,6 +70,7 @@ interface StageState {
 
   // Actions
   setStage: (stage: Stage) => void;
+  updateStage: (stage: Stage) => void;
   setScenes: (scenes: Scene[]) => void;
   addScene: (scene: Scene) => void;
   updateScene: (sceneId: string, updates: Partial<Scene>) => void;
@@ -86,7 +94,7 @@ interface StageState {
   getSceneIndex: (sceneId: string) => number;
 
   // Storage
-  saveToStorage: () => Promise<void>;
+  saveToStorage: (options?: StageSaveOptions) => Promise<void>;
   retryFailedSaves: () => Promise<void>;
   loadFromStorage: (stageId: string) => Promise<void>;
   clearStore: () => void;
@@ -131,6 +139,15 @@ const useStageStoreBase = create<StageState>()((set, get) => ({
     if (!get().currentSceneId && scenes.length > 0) {
       set({ currentSceneId: scenes[0].id });
     }
+    debouncedSave();
+  },
+
+  updateStage: (stage) => {
+    if (get().stage?.id !== stage.id) {
+      get().setStage(stage);
+      return;
+    }
+    set((state) => ({ stage, editRevision: state.editRevision + 1 }));
     debouncedSave();
   },
 
@@ -241,20 +258,31 @@ const useStageStoreBase = create<StageState>()((set, get) => ({
   },
 
   // Storage methods
-  saveToStorage: async () => {
+  saveToStorage: async (options) => {
     const { stage, scenes, currentSceneId, chats, outlines } = get();
-    if (!stage?.id) return;
-    cancelPendingSave(stage.id);
+    const payload =
+      options?.payload ?? (stage ? { stage, scenes, currentSceneId, chats, outlines } : null);
+    if (!payload?.stage.id) return;
+    if (options?.cancelPending !== false) cancelPendingSave(payload.stage.id);
     await persistPayload(
-      stage.id,
-      structuredClone({ stage, scenes, currentSceneId, chats, outlines }),
+      payload.stage.id,
+      structuredClone(payload),
+      undefined,
+      options?.writeHistory,
+      options?.onCommitted,
     );
   },
 
   retryFailedSaves: async () => {
     // Queue the retained payload now, so a subsequent edit always saves after it.
-    const retries = [...failedSaves].map(([stageId, payload]) =>
-      persistPayload(stageId, payload, true),
+    const retries = [...failedSaves].map(([stageId, retained]) =>
+      persistPayload(
+        stageId,
+        retained.payload,
+        retained,
+        retained.writeHistory,
+        retained.onCommitted,
+      ),
     );
     const results = await Promise.allSettled(retries);
     const failure = results.find((result) => result.status === 'rejected');
@@ -353,27 +381,60 @@ function flushPendingSave(stageId?: string) {
   void pending.save().catch((error) => log.error('Failed to flush classroom:', error));
 }
 
-const failedSaves = new Map<string, StageStoreData>();
+interface RetainedSave {
+  payload: StageStoreData;
+  writeHistory?: StageHistoryWrite;
+  onCommitted?: (data: StageStoreData) => void;
+}
+const failedSaves = new Map<string, RetainedSave>();
 
 function publishSaveFailures() {
   useStageStore.setState({ failedSaveStageIds: [...failedSaves.keys()] });
 }
 
-function persistPayload(stageId: string, payload: StageStoreData, retry = false): Promise<void> {
+function persistPayload(
+  stageId: string,
+  payload: StageStoreData,
+  retry?: RetainedSave,
+  writeHistory?: StageHistoryWrite,
+  onCommitted?: (data: StageStoreData) => void,
+): Promise<void> {
   return enqueueStageSave(stageId, async () => {
-    if (retry && failedSaves.get(stageId) !== payload) return;
+    if (retry && failedSaves.get(stageId) !== retry) return;
     try {
       if (payload.scenes.some((scene) => scene.stageId && scene.stageId !== stageId)) {
         throw new Error('Refusing to save scenes that belong to another classroom');
       }
       const { saveStageData } = await import('@/lib/utils/stage-storage');
-      await saveStageData(stageId, payload);
+      let saved = !writeHistory;
+      let metadataOnly = false;
+      await saveStageData(
+        stageId,
+        payload,
+        writeHistory
+          ? async (data) => {
+              const result = await writeHistory(data);
+              saved = result !== false;
+              metadataOnly = typeof result === 'object' && result.metadataOnly;
+              return result;
+            }
+          : undefined,
+      );
+      // A cancelled history retry has been superseded by navigation or editing.
+      // Metadata initialization must not discard an unrelated failed payload.
+      if ((!saved || metadataOnly) && !retry) {
+        if (saved) onCommitted?.(payload);
+        return;
+      }
       failedSaves.delete(stageId);
       publishSaveFailures();
+      if (saved) onCommitted?.(payload);
     } catch (error) {
       // Keep the exact originating version, including after navigation. A later
       // successful save replaces it, so retry never resurrects an older edit.
-      failedSaves.set(stageId, payload);
+      // Retain the history mutation with its body: retrying only the body would
+      // lose the undo point or advance the cursor without its atomic scene write.
+      failedSaves.set(stageId, { payload, writeHistory, onCommitted });
       publishSaveFailures();
       throw error;
     }

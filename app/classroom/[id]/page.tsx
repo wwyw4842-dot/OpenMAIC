@@ -46,10 +46,8 @@ export default function ClassroomDetailPage() {
             if (json.success && json.classroom) {
               const { stage, scenes } = json.classroom;
               useStageStore.getState().setStage(stage);
-              useStageStore.setState({
-                scenes,
-                currentSceneId: scenes[0]?.id ?? null,
-              });
+              useStageStore.getState().setScenes(scenes);
+              useStageStore.getState().setCurrentSceneId(scenes[0]?.id ?? null);
               log.info('Loaded from server-side storage:', classroomId);
 
               // Hydrate server-generated agents into IndexedDB + registry.
