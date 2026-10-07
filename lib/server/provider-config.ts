@@ -174,7 +174,7 @@ function loadEnvSection(
     const envApiKey = process.env[`${prefix}_API_KEY`] || undefined;
     const envBaseUrl = process.env[`${prefix}_BASE_URL`] || undefined;
     const envModelsStr = process.env[`${prefix}_MODELS`];
-    const envModels = envModelsStr
+    const envModels = envModelsStr !== undefined
       ? envModelsStr
           .split(',')
           .map((m) => m.trim())
@@ -303,6 +303,18 @@ export function getServerProviders(): Record<string, { models?: string[]; baseUr
     if (entry.baseUrl) result[id].baseUrl = entry.baseUrl;
   }
   return result;
+}
+
+/** Enforce configured LLM model restrictions before using operator credentials.
+ * Missing models preserves the existing unrestricted contract; an explicit empty
+ * list allows none. Client credentials do not consume the operator's quota.
+ */
+export function assertServerModelAllowed(providerId: string, modelId: string): void {
+  const entry = getConfig().providers[providerId];
+  if (!entry || entry.models === undefined) return;
+  if (!entry.models.some((allowed) => allowed === modelId || allowed === `${providerId}:${modelId}`)) {
+    throw new Error(`Model is not enabled for server provider: ${providerId}`);
+  }
 }
 
 /** Resolve API key: client key > server key > empty string */

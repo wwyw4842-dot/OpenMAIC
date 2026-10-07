@@ -20,12 +20,14 @@ export async function POST(req: NextRequest) {
 
     // MinerU Cloud: verify by calling the cloud API with the token
     if (providerId === 'mineru-cloud') {
-      const resolvedApiKey = resolvePDFApiKey(providerId, apiKey);
+      const clientCloudBase = (baseUrl as string | undefined) || undefined;
+      const resolvedApiKey = clientCloudBase
+        ? (apiKey as string | undefined) || ''
+        : resolvePDFApiKey(providerId, apiKey);
       if (!resolvedApiKey) {
         return apiError('MISSING_REQUIRED_FIELD', 400, 'API Key is required for MinerU Cloud');
       }
 
-      const clientCloudBase = (baseUrl as string | undefined) || undefined;
       if (clientCloudBase && process.env.NODE_ENV === 'production') {
         const ssrfError = await validateUrlForSSRF(clientCloudBase);
         if (ssrfError) {
@@ -46,7 +48,12 @@ export async function POST(req: NextRequest) {
           Accept: 'application/json',
         },
         signal: AbortSignal.timeout(10000),
+        redirect: 'manual',
       });
+
+      if (response.status >= 300 && response.status < 400) {
+        return apiError('REDIRECT_NOT_ALLOWED', 403, 'Redirects are not allowed');
+      }
 
       // Any response (including 4xx for "batch not found") means auth + connectivity works
       // Only network errors or 401/403 indicate a problem

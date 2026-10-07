@@ -360,3 +360,29 @@ pdf:
     });
   });
 });
+
+
+describe('server credential model allowlist', () => {
+  beforeEach(() => { vi.resetModules(); vi.unstubAllEnvs(); clearProviderEnv(); yamlOverride = null; });
+  it('accepts only configured model ids and rejects alias-like strings', async () => {
+    vi.stubEnv('OPENAI_API_KEY', 'synthetic-server-key'); vi.stubEnv('OPENAI_MODELS', 'allowed,openai:qualified');
+    const { assertServerModelAllowed } = await import('@/lib/server/provider-config');
+    expect(() => assertServerModelAllowed('openai', 'allowed')).not.toThrow();
+    expect(() => assertServerModelAllowed('openai', 'qualified')).not.toThrow();
+    for (const id of ['disallowed', 'ALLOWED', ' allowed ', 'openai/allowed']) {
+      expect(() => assertServerModelAllowed('openai', id)).toThrow(/not enabled/);
+    }
+  });
+  it('an explicit empty list denies all while omitted lists preserve compatibility', async () => {
+    yamlOverride = 'providers:\n  openai:\n    apiKey: synthetic-server-key\n    models: []\n';
+    const { assertServerModelAllowed } = await import('@/lib/server/provider-config');
+    expect(() => assertServerModelAllowed('openai', 'any-model')).toThrow(/not enabled/);
+    expect(() => assertServerModelAllowed('not-configured', 'any-model')).not.toThrow();
+  });
+  it('an explicit empty environment list overrides a YAML allowlist', async () => {
+    yamlOverride = 'providers:\n  openai:\n    apiKey: synthetic-server-key\n    models: [allowed]\n';
+    vi.stubEnv('OPENAI_MODELS', '');
+    const { assertServerModelAllowed } = await import('@/lib/server/provider-config');
+    expect(() => assertServerModelAllowed('openai', 'allowed')).toThrow(/not enabled/);
+  });
+});
