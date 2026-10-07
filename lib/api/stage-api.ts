@@ -74,14 +74,37 @@ import type { StageStore } from './stage-api-types';
  * @returns Stage API object
  */
 export function createStageAPI(store: StageStore) {
+  // Browser stores must use their persistence/revision actions. Server-only
+  // stores keep the injected setState behavior and do not need IndexedDB.
+  const owningStore: StageStore = {
+    getState: store.getState,
+    subscribe: store.subscribe,
+    setState(partial) {
+      const state = store.getState();
+      const rest = { ...partial };
+      if (partial.stage && (state.updateStage || state.setStage)) {
+        (state.updateStage ?? state.setStage)!(partial.stage);
+        delete rest.stage;
+      }
+      if (partial.scenes && state.setScenes) {
+        state.setScenes(partial.scenes);
+        delete rest.scenes;
+      }
+      if ('currentSceneId' in partial && state.setCurrentSceneId) {
+        state.setCurrentSceneId(partial.currentSceneId);
+        delete rest.currentSceneId;
+      }
+      if (Object.keys(rest).length) store.setState(rest);
+    },
+  };
   return {
-    scene: createSceneAPI(store),
-    navigation: createNavigationAPI(store),
-    element: createElementAPI(store),
-    canvas: createCanvasAPI(store),
-    whiteboard: createWhiteboardAPI(store),
-    mode: createModeAPI(store),
-    stage: createStageMetaAPI(store),
+    scene: createSceneAPI(owningStore),
+    navigation: createNavigationAPI(owningStore),
+    element: createElementAPI(owningStore),
+    canvas: createCanvasAPI(owningStore),
+    whiteboard: createWhiteboardAPI(owningStore),
+    mode: createModeAPI(owningStore),
+    stage: createStageMetaAPI(owningStore),
   };
 }
 

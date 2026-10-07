@@ -17,6 +17,11 @@ async function seedDatabase(page: import('@playwright/test').Page) {
   // Navigate to home page first — this causes Dexie to open/create the DB at v8
   // with the correct schema. We wait for network idle to ensure Dexie is done.
   await page.goto('/', { waitUntil: 'networkidle' });
+  await page.waitForFunction(async () =>
+    (await indexedDB.databases()).some(
+      (db) => db.name === 'MAIC-Database' && Number(db.version) >= 110,
+    ),
+  );
 
   // Now seed data by opening the DB at its current version (no upgrade).
   // Opening without a version number returns the current version without triggering
@@ -29,6 +34,15 @@ async function seedDatabase(page: import('@playwright/test').Page) {
 
         request.onsuccess = (event) => {
           const db = (event.target as IDBOpenDBRequest).result;
+          if (
+            !['stages', 'scenes', 'stageOutlines'].every((name) =>
+              db.objectStoreNames.contains(name),
+            )
+          ) {
+            db.close();
+            reject(new Error('Dexie schema is not ready'));
+            return;
+          }
           const tx = db.transaction(['stages', 'scenes', 'stageOutlines'], 'readwrite');
           const now = Date.now();
 
@@ -113,7 +127,14 @@ async function seedDatabase(page: import('@playwright/test').Page) {
             db.close();
             resolve();
           };
-          tx.onerror = () => reject(tx.error);
+          tx.onerror = () => {
+            db.close();
+            reject(tx.error);
+          };
+          tx.onabort = () => {
+            db.close();
+            reject(tx.error || new Error('Fixture transaction aborted'));
+          };
         };
 
         request.onerror = () => reject(request.error);
@@ -144,5 +165,139 @@ test.describe('Classroom Interaction', () => {
 
     // Verify second scene is now active — heading in the top bar shows the current scene name
     await expect(page.getByRole('heading', { name: '光反应' })).toBeVisible();
+  });
+
+  test('real IndexedDB quota failure rolls back and retry survives reload', async ({ page }) => {
+    const classroom = new ClassroomPage(page);
+    await classroom.goto(TEST_STAGE_ID);
+    await classroom.waitForLoaded();
+    await expect(classroom.sidebarScenes).toHaveCount(3);
+    const before = await page.evaluate(async (stageId) => {
+      const database = await new Promise<IDBDatabase>((resolve, reject) => {
+        const open = indexedDB.open('MAIC-Database');
+        open.onsuccess = () => resolve(open.result);
+        open.onerror = () => reject(open.error);
+      });
+      const tx = database.transaction('stages');
+      const record = await new Promise<Record<string, unknown>>((resolve) => {
+        const read = tx.objectStore('stages').get(stageId);
+        read.onsuccess = () => resolve(read.result);
+      });
+      database.close();
+      const prototype = IDBObjectStore.prototype;
+      const put = prototype.put;
+      (window as unknown as { restorePut: () => void }).restorePut = () => {
+        prototype.put = put;
+      };
+      prototype.put = function (...args: Parameters<IDBObjectStore['put']>) {
+        if (this.name === 'scenes')
+          throw new DOMException('Injected full disk', 'QuotaExceededError');
+        return put.apply(this, args);
+      };
+      return record;
+    }, TEST_STAGE_ID);
+    await classroom.clickScene(1);
+    await expect(
+      page.getByRole('alert').filter({ hasText: /尚未|could not be saved/ }),
+    ).toContainText(/尚未|could not be saved/);
+    const readStage = () =>
+      page.evaluate(async (stageId) => {
+        const database = await new Promise<IDBDatabase>((resolve, reject) => {
+          const open = indexedDB.open('MAIC-Database');
+          open.onsuccess = () => resolve(open.result);
+          open.onerror = () => reject(open.error);
+        });
+        const tx = database.transaction(['stages', 'scenes']);
+        const stage = await new Promise<Record<string, unknown>>((resolve) => {
+          const request = tx.objectStore('stages').get(stageId);
+          request.onsuccess = () => resolve(request.result);
+        });
+        const scenes = await new Promise<unknown[]>((resolve) => {
+          const request = tx.objectStore('scenes').getAll();
+          request.onsuccess = () => resolve(request.result);
+        });
+        database.close();
+        return { stage, scenes };
+      }, TEST_STAGE_ID);
+    expect((await readStage()).stage).toEqual(before);
+    expect((await readStage()).scenes).toHaveLength(3);
+    await page.evaluate(() => (window as unknown as { restorePut: () => void }).restorePut());
+    await page.getByRole('button', { name: /重试保存|重試儲存|Retry saving/ }).click();
+    await expect(
+      page.getByRole('alert').filter({ hasText: /尚未|could not be saved/ }),
+    ).toBeHidden();
+    expect((await readStage()).stage.currentSceneId).toBe('scene-1');
+    await page.reload();
+    await expect(page.getByRole('heading', { name: '光反应' })).toBeVisible();
+  });
+
+  test('server classroom hydration autosaves its scenes before reload', async ({ page }) => {
+    const stageId = 'server-hydration-stage';
+    const now = Date.now();
+    const classroom = {
+      stage: { id: stageId, name: 'Server classroom', createdAt: now, updatedAt: now },
+      scenes: [
+        {
+          id: 'server-hydration-scene',
+          stageId,
+          type: 'slide',
+          title: 'Server scene',
+          order: 0,
+          content: {
+            type: 'slide',
+            canvas: {
+              id: 'server-slide',
+              viewportSize: 1000,
+              viewportRatio: 0.5625,
+              theme: defaultTheme,
+              elements: [
+                {
+                  type: 'text',
+                  id: 'server-text',
+                  content: '<p>Server content</p>',
+                  left: 50,
+                  top: 50,
+                  width: 900,
+                  height: 100,
+                },
+              ],
+            },
+          },
+          createdAt: now,
+          updatedAt: now,
+        },
+      ],
+    };
+    let serverLoads = 0;
+    await page.route(`**/api/classroom?id=${stageId}`, async (route) => {
+      serverLoads += 1;
+      await route.fulfill({ json: { success: true, classroom } });
+    });
+    await page.goto(`/classroom/${stageId}`);
+    await expect(page.locator('[data-testid="scene-item"]')).toHaveCount(1);
+    await expect
+      .poll(() =>
+        page.evaluate(async (id) => {
+          const database = await new Promise<IDBDatabase>((resolve, reject) => {
+            const request = indexedDB.open('MAIC-Database');
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error);
+          });
+          const scenes = await new Promise<Array<{ stageId: string; title: string }>>(
+            (resolve, reject) => {
+              const request = database.transaction('scenes').objectStore('scenes').getAll();
+              request.onsuccess = () => resolve(request.result);
+              request.onerror = () => reject(request.error);
+            },
+          );
+          database.close();
+          return scenes.filter((scene) => scene.stageId === id).map((scene) => scene.title);
+        }, stageId),
+      )
+      .toEqual(['Server scene']);
+    await page.reload();
+    await expect(page.locator('[data-testid="scene-item"]')).toHaveCount(1);
+    await expect(page.getByRole('heading', { name: 'Server scene' })).toBeVisible();
+    expect(serverLoads).toBe(1);
   });
 });

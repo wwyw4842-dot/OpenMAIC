@@ -1057,5 +1057,9 @@
     "title": "Enter Access Code",
     "placeholder": "Access code",
     "error": "Invalid access code. Please try again."
+  },
+  "saveRecovery": {
+    "message": "Your changes could not be saved. Keep this tab open and retry after freeing storage.",
+    "retry": "Retry saving"
   }
 }

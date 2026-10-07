@@ -4,41 +4,44 @@ import { createSelectors } from '@/lib/utils/create-selectors';
 import type { ChatSession } from '@/lib/types/chat';
 import type { SceneOutline } from '@/lib/types/generation';
 import { createLogger } from '@/lib/logger';
+import type { StageStoreData, StageHistoryWrite } from '@/lib/utils/stage-storage';
+
+interface StageSaveOptions {
+  payload?: StageStoreData;
+  writeHistory?: StageHistoryWrite;
+  cancelPending?: boolean;
+  onCommitted?: (data: StageStoreData) => void;
+}
 
 const log = createLogger('StageStore');
 
+const stageSaveTail = new Map<string, Promise<void>>();
+let loadRequestId = 0;
+
+function enqueueStageSave(stageId: string, job: () => Promise<void>): Promise<void> {
+  const previous = stageSaveTail.get(stageId) ?? Promise.resolve();
+  const current = previous.catch(() => undefined).then(job);
+  const tail = current.then(
+    () => undefined,
+    () => undefined,
+  );
+  stageSaveTail.set(stageId, tail);
+  void tail.then(() => {
+    if (stageSaveTail.get(stageId) === tail) stageSaveTail.delete(stageId);
+  });
+  return current;
+}
+
 /** Virtual scene ID used when the user navigates to a page still being generated */
 export const PENDING_SCENE_ID = '__pending__';
-
-// ==================== Debounce Helper ====================
-
-/**
- * Debounce function to limit how often a function is called
- * @param func Function to debounce
- * @param delay Delay in milliseconds
- */
-function debounce<T extends (...args: Parameters<T>) => ReturnType<T>>(
-  func: T,
-  delay: number,
-): (...args: Parameters<T>) => void {
-  let timeoutId: ReturnType<typeof setTimeout> | null = null;
-
-  return (...args: Parameters<T>) => {
-    if (timeoutId) {
-      clearTimeout(timeoutId);
-    }
-    timeoutId = setTimeout(() => {
-      func(...args);
-      timeoutId = null;
-    }, delay);
-  };
-}
 
 type ToolbarState = 'design' | 'ai';
 
 interface StageState {
   // Stage info
   stage: Stage | null;
+  editRevision: number;
+  failedSaveStageIds: string[];
 
   // Scenes
   scenes: Scene[];
@@ -67,6 +70,7 @@ interface StageState {
 
   // Actions
   setStage: (stage: Stage) => void;
+  updateStage: (stage: Stage) => void;
   setScenes: (scenes: Scene[]) => void;
   addScene: (scene: Scene) => void;
   updateScene: (sceneId: string, updates: Partial<Scene>) => void;
@@ -90,7 +94,8 @@ interface StageState {
   getSceneIndex: (sceneId: string) => number;
 
   // Storage
-  saveToStorage: () => Promise<void>;
+  saveToStorage: (options?: StageSaveOptions) => Promise<void>;
+  retryFailedSaves: () => Promise<void>;
   loadFromStorage: (stageId: string) => Promise<void>;
   clearStore: () => void;
 }
@@ -98,6 +103,8 @@ interface StageState {
 const useStageStoreBase = create<StageState>()((set, get) => ({
   // Initial state
   stage: null,
+  editRevision: 0,
+  failedSaveStageIds: [],
   scenes: [],
   currentSceneId: null,
   chats: [],
@@ -112,22 +119,35 @@ const useStageStoreBase = create<StageState>()((set, get) => ({
 
   // Actions
   setStage: (stage) => {
+    loadRequestId += 1;
+    flushPendingSave(get().stage?.id);
     set((s) => ({
       stage,
       scenes: [],
       currentSceneId: null,
       chats: [],
+      outlines: [],
       generationEpoch: s.generationEpoch + 1,
+      editRevision: s.editRevision + 1,
     }));
     debouncedSave();
   },
 
   setScenes: (scenes) => {
-    set({ scenes });
+    set((state) => ({ scenes, editRevision: state.editRevision + 1 }));
     // Auto-select first scene if no current scene
     if (!get().currentSceneId && scenes.length > 0) {
       set({ currentSceneId: scenes[0].id });
     }
+    debouncedSave();
+  },
+
+  updateStage: (stage) => {
+    if (get().stage?.id !== stage.id) {
+      get().setStage(stage);
+      return;
+    }
+    set((state) => ({ stage, editRevision: state.editRevision + 1 }));
     debouncedSave();
   },
 
@@ -146,6 +166,7 @@ const useStageStoreBase = create<StageState>()((set, get) => ({
     // Auto-switch from pending page to the newly generated scene
     const shouldSwitch = get().currentSceneId === PENDING_SCENE_ID;
     set({
+      editRevision: get().editRevision + 1,
       scenes,
       generatingOutlines,
       ...(shouldSwitch ? { currentSceneId: scene.id } : {}),
@@ -157,7 +178,7 @@ const useStageStoreBase = create<StageState>()((set, get) => ({
     const scenes = get().scenes.map((scene) =>
       scene.id === sceneId ? { ...scene, ...updates } : scene,
     );
-    set({ scenes });
+    set((state) => ({ scenes, editRevision: state.editRevision + 1 }));
     debouncedSave();
   },
 
@@ -170,22 +191,23 @@ const useStageStoreBase = create<StageState>()((set, get) => ({
       const index = get().getSceneIndex(sceneId);
       const newIndex = index < scenes.length ? index : scenes.length - 1;
       set({
+        editRevision: get().editRevision + 1,
         scenes,
         currentSceneId: scenes[newIndex]?.id || null,
       });
     } else {
-      set({ scenes });
+      set((state) => ({ scenes, editRevision: state.editRevision + 1 }));
     }
     debouncedSave();
   },
 
   setCurrentSceneId: (sceneId) => {
-    set({ currentSceneId: sceneId });
+    set((state) => ({ currentSceneId: sceneId, editRevision: state.editRevision + 1 }));
     debouncedSave();
   },
 
   setChats: (chats) => {
-    set({ chats });
+    set((state) => ({ chats, editRevision: state.editRevision + 1 }));
     debouncedSave();
   },
 
@@ -196,19 +218,8 @@ const useStageStoreBase = create<StageState>()((set, get) => ({
   setGeneratingOutlines: (generatingOutlines) => set({ generatingOutlines }),
 
   setOutlines: (outlines) => {
-    set({ outlines });
-    // Persist outlines to IndexedDB
-    const stageId = get().stage?.id;
-    if (stageId) {
-      import('@/lib/utils/database').then(({ db }) => {
-        db.stageOutlines.put({
-          stageId,
-          outlines,
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
-        });
-      });
-    }
+    set((state) => ({ outlines, editRevision: state.editRevision + 1 }));
+    debouncedSave();
   },
 
   setGenerationStatus: (generationStatus) => set({ generationStatus }),
@@ -247,28 +258,43 @@ const useStageStoreBase = create<StageState>()((set, get) => ({
   },
 
   // Storage methods
-  saveToStorage: async () => {
-    const { stage, scenes, currentSceneId, chats } = get();
-    if (!stage?.id) {
-      log.warn('Cannot save: stage.id is required');
-      return;
-    }
+  saveToStorage: async (options) => {
+    const { stage, scenes, currentSceneId, chats, outlines } = get();
+    const payload =
+      options?.payload ?? (stage ? { stage, scenes, currentSceneId, chats, outlines } : null);
+    if (!payload?.stage.id) return;
+    if (options?.cancelPending !== false) cancelPendingSave(payload.stage.id);
+    await persistPayload(
+      payload.stage.id,
+      structuredClone(payload),
+      undefined,
+      options?.writeHistory,
+      options?.onCommitted,
+    );
+  },
 
-    try {
-      const { saveStageData } = await import('@/lib/utils/stage-storage');
-      await saveStageData(stage.id, {
-        stage,
-        scenes,
-        currentSceneId,
-        chats,
-      });
-    } catch (error) {
-      log.error('Failed to save to storage:', error);
-    }
+  retryFailedSaves: async () => {
+    // Queue the retained payload now, so a subsequent edit always saves after it.
+    const retries = [...failedSaves].map(([stageId, retained]) =>
+      persistPayload(
+        stageId,
+        retained.payload,
+        retained,
+        retained.writeHistory,
+        retained.onCommitted,
+      ),
+    );
+    const results = await Promise.allSettled(retries);
+    const failure = results.find((result) => result.status === 'rejected');
+    if (failure?.status === 'rejected') throw failure.reason;
   },
 
   loadFromStorage: async (stageId: string) => {
+    const requestId = ++loadRequestId;
+    const startingState = get();
+    flushPendingSave(startingState.stage?.id);
     try {
+      await stageSaveTail.get(stageId);
       // Skip IndexedDB load if the store already has this stage with scenes
       // (e.g. navigated from generation-preview with fresh in-memory data)
       const currentState = get();
@@ -285,8 +311,11 @@ const useStageStoreBase = create<StageState>()((set, get) => ({
       const outlinesRecord = await db.stageOutlines.get(stageId);
       const outlines = outlinesRecord?.outlines || [];
 
+      // Navigation or edits that happened during the read own the current UI.
+      if (requestId !== loadRequestId || get().editRevision !== startingState.editRevision) return;
       if (data) {
         set({
+          editRevision: get().editRevision + 1,
           stage: data.stage,
           scenes: data.scenes,
           currentSceneId: data.currentSceneId,
@@ -306,6 +335,8 @@ const useStageStoreBase = create<StageState>()((set, get) => ({
   },
 
   clearStore: () => {
+    loadRequestId += 1;
+    flushPendingSave(get().stage?.id);
     set((s) => ({
       stage: null,
       scenes: [],
@@ -313,6 +344,7 @@ const useStageStoreBase = create<StageState>()((set, get) => ({
       chats: [],
       outlines: [],
       generationEpoch: s.generationEpoch + 1,
+      editRevision: s.editRevision + 1,
       generationStatus: 'idle' as const,
       currentGeneratingOrder: -1,
       failedOutlines: [],
@@ -330,6 +362,95 @@ export const useStageStore = createSelectors(useStageStoreBase);
  * Debounced version of saveToStorage to prevent excessive writes
  * Waits 500ms after the last change before saving
  */
-const debouncedSave = debounce(() => {
-  useStageStore.getState().saveToStorage();
-}, 500);
+const pendingSaves = new Map<
+  string,
+  { timer: ReturnType<typeof setTimeout>; save: () => Promise<void> }
+>();
+
+function cancelPendingSave(stageId: string) {
+  const pending = pendingSaves.get(stageId);
+  if (pending) clearTimeout(pending.timer);
+  pendingSaves.delete(stageId);
+}
+
+function flushPendingSave(stageId?: string) {
+  if (!stageId) return;
+  const pending = pendingSaves.get(stageId);
+  if (!pending) return;
+  cancelPendingSave(stageId);
+  void pending.save().catch((error) => log.error('Failed to flush classroom:', error));
+}
+
+interface RetainedSave {
+  payload: StageStoreData;
+  writeHistory?: StageHistoryWrite;
+  onCommitted?: (data: StageStoreData) => void;
+}
+const failedSaves = new Map<string, RetainedSave>();
+
+function publishSaveFailures() {
+  useStageStore.setState({ failedSaveStageIds: [...failedSaves.keys()] });
+}
+
+function persistPayload(
+  stageId: string,
+  payload: StageStoreData,
+  retry?: RetainedSave,
+  writeHistory?: StageHistoryWrite,
+  onCommitted?: (data: StageStoreData) => void,
+): Promise<void> {
+  return enqueueStageSave(stageId, async () => {
+    if (retry && failedSaves.get(stageId) !== retry) return;
+    try {
+      if (payload.scenes.some((scene) => scene.stageId && scene.stageId !== stageId)) {
+        throw new Error('Refusing to save scenes that belong to another classroom');
+      }
+      const { saveStageData } = await import('@/lib/utils/stage-storage');
+      let saved = !writeHistory;
+      let metadataOnly = false;
+      await saveStageData(
+        stageId,
+        payload,
+        writeHistory
+          ? async (data) => {
+              const result = await writeHistory(data);
+              saved = result !== false;
+              metadataOnly = typeof result === 'object' && result.metadataOnly;
+              return result;
+            }
+          : undefined,
+      );
+      // A cancelled history retry has been superseded by navigation or editing.
+      // Metadata initialization must not discard an unrelated failed payload.
+      if ((!saved || metadataOnly) && !retry) {
+        if (saved) onCommitted?.(payload);
+        return;
+      }
+      failedSaves.delete(stageId);
+      publishSaveFailures();
+      if (saved) onCommitted?.(payload);
+    } catch (error) {
+      // Keep the exact originating version, including after navigation. A later
+      // successful save replaces it, so retry never resurrects an older edit.
+      // Retain the history mutation with its body: retrying only the body would
+      // lose the undo point or advance the cursor without its atomic scene write.
+      failedSaves.set(stageId, { payload, writeHistory, onCommitted });
+      publishSaveFailures();
+      throw error;
+    }
+  });
+}
+
+function debouncedSave() {
+  const { stage, scenes, currentSceneId, chats, outlines } = useStageStore.getState();
+  if (!stage) return;
+  const stageId = stage.id;
+  const payload = structuredClone({ stage, scenes, currentSceneId, chats, outlines });
+  cancelPendingSave(stageId);
+  const save = () => persistPayload(stageId, payload);
+  const timer = setTimeout(() => {
+    pendingSaves.delete(stageId);
+    void save().catch((error) => log.error('Failed to autosave classroom:', error));
+  }, 500);
+  pendingSaves.set(stageId, { timer, save });
+}
