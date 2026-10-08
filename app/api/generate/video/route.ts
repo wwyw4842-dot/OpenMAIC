@@ -18,7 +18,7 @@
 
 import { NextRequest } from 'next/server';
 import { generateVideo, normalizeVideoOptions } from '@/lib/media/video-providers';
-import { resolveVideoApiKey, resolveVideoBaseUrl } from '@/lib/server/provider-config';
+import { resolveVideoConfig, ServerMediaModelError } from '@/lib/server/resolve-media-config';
 import type { VideoProviderId, VideoGenerationOptions } from '@/lib/media/types';
 import { createLogger } from '@/lib/logger';
 import { apiError, apiSuccess } from '@/lib/server/api-response';
@@ -48,9 +48,12 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    const apiKey = clientBaseUrl
-      ? clientApiKey || ''
-      : resolveVideoApiKey(providerId, clientApiKey);
+    const config = resolveVideoConfig(providerId, {
+      model: clientModel,
+      apiKey: clientApiKey,
+      baseUrl: clientBaseUrl,
+    });
+    const { apiKey } = config;
     if (!apiKey) {
       return apiError(
         'MISSING_API_KEY',
@@ -58,8 +61,6 @@ export async function POST(request: NextRequest) {
         `No API key configured for video provider: ${providerId}`,
       );
     }
-
-    const baseUrl = clientBaseUrl ? clientBaseUrl : resolveVideoBaseUrl(providerId, clientBaseUrl);
 
     // Normalize options against provider capabilities
     const options = normalizeVideoOptions(providerId, body);
@@ -70,10 +71,7 @@ export async function POST(request: NextRequest) {
         `aspect=${options.aspectRatio ?? 'auto'}, resolution=${options.resolution ?? 'auto'}`,
     );
 
-    const result = await generateVideo(
-      { providerId, apiKey, baseUrl, model: clientModel },
-      options,
-    );
+    const result = await generateVideo(config, options);
 
     log.info(
       `Video generated: url=${result.url ? 'yes' : 'no'}, ${result.width}x${result.height}, ${result.duration}s`,
@@ -81,6 +79,9 @@ export async function POST(request: NextRequest) {
 
     return apiSuccess({ result });
   } catch (error) {
+    if (error instanceof ServerMediaModelError) {
+      return apiError('INVALID_REQUEST', 403, error.message);
+    }
     const message = error instanceof Error ? error.message : String(error);
     // Detect content safety filter rejections (e.g. Seedance SensitiveContent errors)
     if (message.includes('SensitiveContent') || message.includes('sensitive information')) {

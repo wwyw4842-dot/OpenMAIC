@@ -174,12 +174,13 @@ function loadEnvSection(
     const envApiKey = process.env[`${prefix}_API_KEY`] || undefined;
     const envBaseUrl = process.env[`${prefix}_BASE_URL`] || undefined;
     const envModelsStr = process.env[`${prefix}_MODELS`];
-    const envModels = envModelsStr !== undefined
-      ? envModelsStr
-          .split(',')
-          .map((m) => m.trim())
-          .filter(Boolean)
-      : undefined;
+    const envModels =
+      envModelsStr !== undefined
+        ? envModelsStr
+            .split(',')
+            .map((m) => m.trim())
+            .filter(Boolean)
+        : undefined;
 
     if (result[providerId]) {
       // YAML entry exists — env vars override individual fields
@@ -226,11 +227,18 @@ function applyOpenAIImageFallback(
   if (!apiKey) return imageConfig;
 
   const yamlOpenAIImage = yamlImageSection?.[OPENAI_IMAGE_PROVIDER_ID];
+  const envModels = process.env.IMAGE_OPENAI_MODELS;
   imageConfig[OPENAI_IMAGE_PROVIDER_ID] = {
     apiKey,
     baseUrl:
       yamlOpenAIImage?.baseUrl || process.env.IMAGE_OPENAI_BASE_URL || process.env.OPENAI_BASE_URL,
-    models: yamlOpenAIImage?.models,
+    models:
+      envModels === undefined
+        ? yamlOpenAIImage?.models
+        : envModels
+            .split(',')
+            .map((m) => m.trim())
+            .filter(Boolean),
     proxy: yamlOpenAIImage?.proxy,
   };
   return imageConfig;
@@ -312,7 +320,9 @@ export function getServerProviders(): Record<string, { models?: string[]; baseUr
 export function assertServerModelAllowed(providerId: string, modelId: string): void {
   const entry = getConfig().providers[providerId];
   if (!entry || entry.models === undefined) return;
-  if (!entry.models.some((allowed) => allowed === modelId || allowed === `${providerId}:${modelId}`)) {
+  if (
+    !entry.models.some((allowed) => allowed === modelId || allowed === `${providerId}:${modelId}`)
+  ) {
     throw new Error(`Model is not enabled for server provider: ${providerId}`);
   }
 }
@@ -332,6 +342,78 @@ export function resolveBaseUrl(providerId: string, clientBaseUrl?: string): stri
 /** Resolve proxy URL for a provider (server config only) */
 export function resolveProxy(providerId: string): string | undefined {
   return getConfig().providers[providerId]?.proxy;
+}
+
+export class ServerMediaModelError extends Error {
+  constructor(providerId: string) {
+    super(`Model is not enabled for server media provider: ${providerId}`);
+    this.name = 'ServerMediaModelError';
+  }
+}
+
+/**
+ * Shared credential boundary for image/video/TTS/ASR, including connectivity and
+ * automatic classroom generation. An omitted models field stays unrestricted;
+ * an explicit empty (or invalid) list permits no operator-backed requests.
+ * A client URL never inherits operator credentials, even if it matches the
+ * operator URL. BYOK retains its existing model and endpoint contract.
+ */
+export function resolveMediaProviderConfig(
+  section: 'image' | 'video' | 'tts' | 'asr',
+  providerId: string,
+  params: {
+    model?: string;
+    defaultModel: string;
+    apiKey?: string;
+    baseUrl?: string;
+    useConfiguredDefault?: boolean;
+    normalizeModel?: (model: string) => string;
+  },
+): { apiKey: string; baseUrl?: string; model: string } {
+  const entry = getConfig()[section][providerId];
+  const usesOperator = !params.apiKey && !params.baseUrl;
+  const configuredModels = entry?.models;
+  const unqualify = (model: string): string | undefined => {
+    const separator = model.indexOf(':');
+    if (separator < 0) return model;
+    const prefix = model.slice(0, separator);
+    return prefix === providerId ? model.slice(separator + 1) : undefined;
+  };
+  let model = params.model || params.defaultModel;
+  if (usesOperator && params.useConfiguredDefault && !params.model && configuredModels) {
+    if (!Array.isArray(configuredModels) || typeof configuredModels[0] !== 'string') {
+      throw new ServerMediaModelError(providerId);
+    }
+    const selectedModel = unqualify(configuredModels[0]);
+    if (selectedModel === undefined) throw new ServerMediaModelError(providerId);
+    model = selectedModel;
+  }
+  if (typeof model !== 'string') throw new ServerMediaModelError(providerId);
+  model = params.normalizeModel ? params.normalizeModel(model) : model;
+  // A configured allowlist entry must name a real wire model. Empty entries
+  // (including `provider:` aliases) must not authorize an adapter that falls
+  // back to its own default after this boundary has accepted the request.
+  if (usesOperator && configuredModels !== undefined && !model.trim()) {
+    throw new ServerMediaModelError(providerId);
+  }
+  if (
+    usesOperator &&
+    configuredModels !== undefined &&
+    (!Array.isArray(configuredModels) ||
+      !configuredModels.some(
+        (allowed) =>
+          typeof allowed === 'string' &&
+          unqualify(allowed) !== undefined &&
+          unqualify(allowed) === model,
+      ))
+  ) {
+    throw new ServerMediaModelError(providerId);
+  }
+  return {
+    model,
+    apiKey: params.baseUrl ? params.apiKey || '' : params.apiKey || entry?.apiKey || '',
+    baseUrl: params.baseUrl || entry?.baseUrl,
+  };
 }
 
 // ---------------------------------------------------------------------------

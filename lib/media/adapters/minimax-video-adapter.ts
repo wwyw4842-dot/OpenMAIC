@@ -212,7 +212,7 @@ export async function testMiniMaxVideoConnectivity(
         'Content-Type': 'application/json; charset=utf-8',
       },
       body: JSON.stringify({
-        model: 'MiniMax-Hailuo-2.3',
+        model: config.model || 'MiniMax-Hailuo-2.3',
         prompt: 'test connectivity',
         duration: 6,
         resolution: '768P',

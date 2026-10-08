@@ -1,6 +1,6 @@
 import { NextRequest } from 'next/server';
 import { transcribeAudio } from '@/lib/audio/asr-providers';
-import { resolveASRApiKey, resolveASRBaseUrl } from '@/lib/server/provider-config';
+import { resolveASRConfig, ServerMediaModelError } from '@/lib/server/resolve-media-config';
 import type { ASRProviderId } from '@/lib/audio/types';
 import { createLogger } from '@/lib/logger';
 import { apiError, apiSuccess } from '@/lib/server/api-response';
@@ -39,15 +39,12 @@ export async function POST(req: NextRequest) {
     }
 
     const config = {
-      providerId: effectiveProviderId,
-      modelId: modelId || undefined,
+      ...resolveASRConfig(effectiveProviderId, {
+        model: modelId || undefined,
+        apiKey: apiKey || undefined,
+        baseUrl: clientBaseUrl,
+      }),
       language: language || 'auto',
-      apiKey: clientBaseUrl
-        ? apiKey || ''
-        : resolveASRApiKey(effectiveProviderId, apiKey || undefined),
-      baseUrl: clientBaseUrl
-        ? clientBaseUrl
-        : resolveASRBaseUrl(effectiveProviderId, baseUrl || undefined),
     };
 
     // Transcribe using the provider system
@@ -55,6 +52,9 @@ export async function POST(req: NextRequest) {
 
     return apiSuccess({ text: result.text });
   } catch (error) {
+    if (error instanceof ServerMediaModelError) {
+      return apiError('INVALID_REQUEST', 403, error.message);
+    }
     log.error(
       `Transcription failed [provider=${resolvedProviderId ?? 'unknown'}, model=${resolvedModelId ?? 'default'}]:`,
       error,
