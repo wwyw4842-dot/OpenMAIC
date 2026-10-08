@@ -16,7 +16,7 @@
 
 import { NextRequest } from 'next/server';
 import { IMAGE_PROVIDERS, testImageConnectivity } from '@/lib/media/image-providers';
-import { resolveImageApiKey, resolveImageBaseUrl } from '@/lib/server/provider-config';
+import { resolveImageConfig, ServerMediaModelError } from '@/lib/server/resolve-media-config';
 import type { ImageProviderId } from '@/lib/media/types';
 import { apiError, apiSuccess } from '@/lib/server/api-response';
 import { createLogger } from '@/lib/logger';
@@ -38,22 +38,19 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    const apiKey = clientBaseUrl
-      ? clientApiKey || ''
-      : resolveImageApiKey(providerId, clientApiKey);
-    const baseUrl = clientBaseUrl ? clientBaseUrl : resolveImageBaseUrl(providerId, clientBaseUrl);
+    const config = resolveImageConfig(providerId, {
+      model: model,
+      apiKey: clientApiKey,
+      baseUrl: clientBaseUrl,
+    });
+    const { apiKey } = config;
 
     const provider = IMAGE_PROVIDERS[providerId];
     if (provider?.requiresApiKey && !apiKey) {
       return apiError('MISSING_API_KEY', 400, 'No API key configured');
     }
 
-    const result = await testImageConnectivity({
-      providerId,
-      apiKey,
-      baseUrl,
-      model,
-    });
+    const result = await testImageConnectivity(config);
 
     if (!result.success) {
       return apiError('UPSTREAM_ERROR', 500, result.message);
@@ -61,6 +58,9 @@ export async function POST(request: NextRequest) {
 
     return apiSuccess({ message: result.message });
   } catch (err) {
+    if (err instanceof ServerMediaModelError) {
+      return apiError('INVALID_REQUEST', 403, err.message);
+    }
     log.error(
       `Image provider verification failed [provider=${request.headers.get('x-image-provider') ?? 'seedream'}]:`,
       err,

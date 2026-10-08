@@ -16,7 +16,7 @@
 
 import { NextRequest } from 'next/server';
 import { testVideoConnectivity } from '@/lib/media/video-providers';
-import { resolveVideoApiKey, resolveVideoBaseUrl } from '@/lib/server/provider-config';
+import { resolveVideoConfig, ServerMediaModelError } from '@/lib/server/resolve-media-config';
 import type { VideoProviderId } from '@/lib/media/types';
 import { apiError, apiSuccess } from '@/lib/server/api-response';
 import { createLogger } from '@/lib/logger';
@@ -38,21 +38,18 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    const apiKey = clientBaseUrl
-      ? clientApiKey || ''
-      : resolveVideoApiKey(providerId, clientApiKey);
-    const baseUrl = clientBaseUrl ? clientBaseUrl : resolveVideoBaseUrl(providerId, clientBaseUrl);
+    const config = resolveVideoConfig(providerId, {
+      model: model,
+      apiKey: clientApiKey,
+      baseUrl: clientBaseUrl,
+    });
+    const { apiKey } = config;
 
     if (!apiKey) {
       return apiError('MISSING_API_KEY', 400, 'No API key configured');
     }
 
-    const result = await testVideoConnectivity({
-      providerId,
-      apiKey,
-      baseUrl,
-      model,
-    });
+    const result = await testVideoConnectivity(config);
 
     if (!result.success) {
       return apiError('UPSTREAM_ERROR', 500, result.message);
@@ -60,6 +57,9 @@ export async function POST(request: NextRequest) {
 
     return apiSuccess({ message: result.message });
   } catch (err) {
+    if (err instanceof ServerMediaModelError) {
+      return apiError('INVALID_REQUEST', 403, err.message);
+    }
     log.error(
       `Video provider verification failed [provider=${request.headers.get('x-video-provider') ?? 'seedance'}]:`,
       err,

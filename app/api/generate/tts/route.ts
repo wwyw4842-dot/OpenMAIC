@@ -9,7 +9,7 @@
 
 import { NextRequest } from 'next/server';
 import { generateTTS } from '@/lib/audio/tts-providers';
-import { resolveTTSApiKey, resolveTTSBaseUrl } from '@/lib/server/provider-config';
+import { resolveTTSConfig, ServerMediaModelError } from '@/lib/server/resolve-media-config';
 import type { TTSProviderId } from '@/lib/audio/types';
 import { createLogger } from '@/lib/logger';
 import { apiError, apiSuccess } from '@/lib/server/api-response';
@@ -77,21 +77,16 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    const apiKey = clientBaseUrl
-      ? ttsApiKey || ''
-      : resolveTTSApiKey(ttsProviderId, ttsApiKey || undefined);
-    const baseUrl = clientBaseUrl
-      ? clientBaseUrl
-      : resolveTTSBaseUrl(ttsProviderId, ttsBaseUrl || undefined);
-
     // Build TTS config
     const config = {
-      providerId: ttsProviderId as TTSProviderId,
-      modelId: ttsModelId,
+      ...resolveTTSConfig(ttsProviderId as TTSProviderId, {
+        model: ttsModelId,
+        apiKey: ttsApiKey,
+        baseUrl: clientBaseUrl,
+        providerOptions: ttsProviderOptions,
+      }),
       voice: ttsVoice,
       speed: ttsSpeed ?? 1.0,
-      apiKey,
-      baseUrl,
       providerOptions: ttsProviderOptions,
     };
 
@@ -107,6 +102,9 @@ export async function POST(req: NextRequest) {
 
     return apiSuccess({ audioId, base64, format });
   } catch (error) {
+    if (error instanceof ServerMediaModelError) {
+      return apiError('INVALID_REQUEST', 403, error.message);
+    }
     log.error(
       `TTS generation failed [provider=${ttsProviderId ?? 'unknown'}, voice=${ttsVoice ?? 'unknown'}, audioId=${audioId ?? 'unknown'}]:`,
       error,

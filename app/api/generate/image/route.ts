@@ -21,7 +21,7 @@ import {
   aspectRatioToDimensions,
   IMAGE_PROVIDERS,
 } from '@/lib/media/image-providers';
-import { resolveImageApiKey, resolveImageBaseUrl } from '@/lib/server/provider-config';
+import { resolveImageConfig, ServerMediaModelError } from '@/lib/server/resolve-media-config';
 import type { ImageProviderId, ImageGenerationOptions } from '@/lib/media/types';
 import { createLogger } from '@/lib/logger';
 import { apiError, apiSuccess } from '@/lib/server/api-response';
@@ -51,9 +51,12 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    const apiKey = clientBaseUrl
-      ? clientApiKey || ''
-      : resolveImageApiKey(providerId, clientApiKey);
+    const config = resolveImageConfig(providerId, {
+      model: clientModel,
+      apiKey: clientApiKey,
+      baseUrl: clientBaseUrl,
+    });
+    const { apiKey } = config;
     const provider = IMAGE_PROVIDERS[providerId];
     if (provider?.requiresApiKey && !apiKey) {
       return apiError(
@@ -62,8 +65,6 @@ export async function POST(request: NextRequest) {
         `No API key configured for image provider: ${providerId}`,
       );
     }
-
-    const baseUrl = clientBaseUrl ? clientBaseUrl : resolveImageBaseUrl(providerId, clientBaseUrl);
 
     // Resolve dimensions from aspect ratio if not explicitly set
     if (!body.width && !body.height && body.aspectRatio) {
@@ -77,10 +78,13 @@ export async function POST(request: NextRequest) {
         `prompt="${body.prompt.slice(0, 80)}...", size=${body.width ?? 'auto'}x${body.height ?? 'auto'}`,
     );
 
-    const result = await generateImage({ providerId, apiKey, baseUrl, model: clientModel }, body);
+    const result = await generateImage(config, body);
 
     return apiSuccess({ result });
   } catch (error) {
+    if (error instanceof ServerMediaModelError) {
+      return apiError('INVALID_REQUEST', 403, error.message);
+    }
     const message = error instanceof Error ? error.message : String(error);
     // Detect content safety filter rejections (e.g. Seedream OutputImageSensitiveContentDetected)
     if (message.includes('SensitiveContent') || message.includes('sensitive information')) {
