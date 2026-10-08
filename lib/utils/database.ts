@@ -11,6 +11,7 @@ import type {
 import type { SceneOutline } from '@/lib/types/generation';
 import type { UIMessage } from 'ai';
 import { createLogger } from '@/lib/logger';
+import type { StageStoreData } from './stage-storage';
 
 const log = createLogger('Database');
 
@@ -52,6 +53,8 @@ export interface StageRecord {
   agentIds?: string[]; // Agent IDs selected at creation time
   videoManifest?: VideoManifest; // Generated video request manifest; non-indexed
   interactiveMode?: boolean; // Interactive Mode flag; non-indexed
+  conflictDraft?: { payload: StageStoreData }; // Separate recovery row; never a live classroom
+  contentRevision?: number; // Non-indexed CAS version; legacy records start at zero
   snapshotCursor?: number; // Current undo position; non-indexed and optional for older records
   snapshotSessionId?: string; // Active history session; older unmatched history remains recoverable
 }

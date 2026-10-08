@@ -5,6 +5,7 @@
  * Each stage has its own storage key based on stageId
  */
 
+import { nanoid } from 'nanoid';
 import { Stage, Scene } from '../types/stage';
 import type { SceneOutline } from '../types/generation';
 import { ChatSession } from '../types/chat';
@@ -18,6 +19,8 @@ const log = createLogger('StageStorage');
 
 export interface StageStoreData {
   stage: Stage;
+  /** null means a new record; zero is an existing legacy record. */
+  contentRevision?: number | null;
   scenes: Scene[];
   currentSceneId: string | null;
   chats: ChatSession[];
@@ -29,7 +32,7 @@ export interface StageStoreData {
 /** Runs inside the same transaction as the classroom payload. False cancels a stale request. */
 export type StageHistoryWrite = (
   data: StageStoreData,
-) => Promise<boolean | { metadataOnly: true } | void>;
+) => Promise<boolean | { metadataOnly: true; unchanged?: boolean } | void>;
 
 export interface StageListItem {
   id: string;
@@ -41,6 +44,25 @@ export interface StageListItem {
   interactiveMode?: boolean;
 }
 
+export class StageSaveConflictError extends Error {
+  constructor(
+    readonly stageId: string,
+    readonly expectedRevision: number | null,
+    readonly actualRevision: number | null,
+  ) {
+    super(`Classroom save conflict: ${stageId}`);
+    this.name = 'StageSaveConflictError';
+  }
+}
+
+function storedRevision(record: { contentRevision?: number } | undefined): number | null {
+  if (!record) return null;
+  const revision = record.contentRevision ?? 0;
+  if (!Number.isSafeInteger(revision) || revision < 0)
+    throw new Error('Invalid classroom revision');
+  return revision;
+}
+
 /**
  * Save stage data to IndexedDB
  */
@@ -48,10 +70,11 @@ export async function saveStageData(
   stageId: string,
   data: StageStoreData,
   writeHistory?: StageHistoryWrite,
-): Promise<void> {
+): Promise<{ contentRevision: number | null; saved: boolean }> {
   try {
     const now = Date.now();
     let saved = false;
+    let revision = data.contentRevision ?? null;
 
     // One transaction so a quota failure cannot delete scenes and then abort.
     // saveChatSessions opens a nested transaction on chatSessions only; Dexie
@@ -66,11 +89,27 @@ export async function saveStageData(
         ...(writeHistory ? [db.snapshots] : []),
       ],
       async () => {
+        const previous = await db.stages.get(stageId);
+        const actualRevision = storedRevision(previous);
+        if (actualRevision !== revision) {
+          throw new StageSaveConflictError(stageId, revision, actualRevision);
+        }
         const historyResult = await writeHistory?.(data);
         if (historyResult === false) return;
-        const previous = await db.stages.get(stageId);
+        revision = (actualRevision ?? 0) + 1;
+        if (!Number.isSafeInteger(revision)) throw new Error('Classroom revision limit reached');
         if (previous && typeof historyResult === 'object' && historyResult.metadataOnly) {
+          if (
+            historyResult.unchanged &&
+            previous.snapshotCursor === data.snapshotCursor &&
+            previous.snapshotSessionId === data.snapshotSessionId
+          ) {
+            revision = actualRevision;
+            saved = true;
+            return;
+          }
           await db.stages.update(stageId, {
+            contentRevision: revision,
             snapshotCursor: data.snapshotCursor,
             snapshotSessionId: data.snapshotSessionId,
           });
@@ -79,6 +118,7 @@ export async function saveStageData(
         }
         await db.stages.put({
           id: stageId,
+          contentRevision: revision,
           name: data.stage.name || 'Untitled Stage',
           description: data.stage.description,
           createdAt: data.stage.createdAt || now,
@@ -124,6 +164,7 @@ export async function saveStageData(
     );
 
     if (saved) log.info(`Saved stage: ${stageId}`);
+    return { contentRevision: revision, saved };
   } catch (error) {
     log.error('Failed to save stage:', error);
     throw error;
@@ -135,27 +176,29 @@ export async function saveStageData(
  */
 export async function loadStageData(stageId: string): Promise<StageStoreData | null> {
   try {
-    // Load stage
-    const stage = await db.stages.get(stageId);
-    if (!stage) {
-      log.info(`Stage not found: ${stageId}`);
-      return null;
-    }
-
-    // Load scenes
-    const scenes = await db.scenes.where('stageId').equals(stageId).sortBy('order');
-
-    // Load chat sessions from independent table
-    const chats = await loadChatSessions(stageId);
-
-    log.info(`Loaded stage: ${stageId}, scenes: ${scenes.length}, chats: ${chats.length}`);
-
-    return {
-      stage,
-      scenes,
-      currentSceneId: stage.currentSceneId || scenes[0]?.id || null,
-      chats,
-    };
+    // Read the version and body from one snapshot; a concurrent writer cannot
+    // leave this tab with scenes from a different revision than its CAS baseline.
+    return await db.transaction(
+      'r',
+      [db.stages, db.scenes, db.chatSessions, db.stageOutlines],
+      async () => {
+        const stage = await db.stages.get(stageId);
+        if (!stage || stage.conflictDraft) return null;
+        const scenes = await db.scenes.where('stageId').equals(stageId).sortBy('order');
+        const chats = await loadChatSessions(stageId);
+        const outlines = (await db.stageOutlines.get(stageId))?.outlines ?? [];
+        return {
+          stage,
+          scenes,
+          chats,
+          outlines,
+          contentRevision: storedRevision(stage),
+          currentSceneId: stage.currentSceneId || scenes[0]?.id || null,
+          snapshotCursor: stage.snapshotCursor,
+          snapshotSessionId: stage.snapshotSessionId,
+        };
+      },
+    );
   } catch (error) {
     log.error('Failed to load stage:', error);
     return null;
@@ -198,7 +241,9 @@ export async function deleteStageData(stageId: string): Promise<void> {
  */
 export async function listStages(): Promise<StageListItem[]> {
   try {
-    const stages = await db.stages.orderBy('updatedAt').reverse().toArray();
+    const stages = (await db.stages.orderBy('updatedAt').reverse().toArray()).filter(
+      (record) => !record.conflictDraft,
+    );
 
     const stageList: StageListItem[] = await Promise.all(
       stages.map(async (stage) => {
@@ -357,7 +402,17 @@ export async function getFirstSlideByStages(
  */
 export async function renameStage(stageId: string, newName: string): Promise<void> {
   try {
-    await db.stages.update(stageId, { name: newName, updatedAt: Date.now() });
+    await db.transaction('rw', db.stages, async () => {
+      const previous = await db.stages.get(stageId);
+      if (!previous) throw new Error('Classroom no longer exists');
+      const revision = storedRevision(previous)! + 1;
+      if (!Number.isSafeInteger(revision)) throw new Error('Classroom revision limit reached');
+      await db.stages.update(stageId, {
+        name: newName,
+        updatedAt: Date.now(),
+        contentRevision: revision,
+      });
+    });
     log.info(`Renamed stage ${stageId} to "${newName}"`);
   } catch (error) {
     log.error('Failed to rename stage:', error);
@@ -376,4 +431,85 @@ export async function stageExists(stageId: string): Promise<boolean> {
     log.error('Failed to check stage existence:', error);
     return false;
   }
+}
+
+/** Preserve a conflicted draft as a new classroom without touching its source. */
+export async function saveStageCopy(source: StageStoreData): Promise<string> {
+  const sourceId = source.stage.id;
+  const stageId = nanoid();
+  const data = structuredClone(source);
+  const sceneIds = new Map(data.scenes.map((scene) => [scene.id, nanoid()]));
+  data.stage = { ...data.stage, id: stageId, name: `${data.stage.name} (copy)` };
+  data.contentRevision = null;
+  delete data.snapshotCursor;
+  delete data.snapshotSessionId;
+  data.scenes = data.scenes.map((scene) => ({ ...scene, id: sceneIds.get(scene.id)!, stageId }));
+  data.currentSceneId = sceneIds.get(data.currentSceneId ?? '') ?? null;
+  data.chats = data.chats.map((chat) => ({
+    ...chat,
+    id: nanoid(),
+    sceneId: chat.sceneId ? sceneIds.get(chat.sceneId) : undefined,
+  }));
+  await db.transaction(
+    'rw',
+    [db.stages, db.scenes, db.chatSessions, db.stageOutlines, db.mediaFiles, db.generatedAgents],
+    async () => {
+      const media = await db.mediaFiles.where('stageId').equals(sourceId).toArray();
+      await db.mediaFiles.bulkPut(
+        media.map((record) => ({
+          ...record,
+          stageId,
+          id: `${stageId}:${getMediaRecordElementId(record.id)}`,
+        })),
+      );
+      const agents = await db.generatedAgents.where('stageId').equals(sourceId).toArray();
+      const agentIds = new Map(agents.map((agent) => [agent.id, `gen-${nanoid()}`]));
+      const references = new Map([
+        ...sceneIds,
+        ...agentIds,
+        [sourceId, stageId] as [string, string],
+      ]);
+      const remapReferences = (value: unknown): unknown => {
+        if (typeof value === 'string') return references.get(value) ?? value;
+        if (Array.isArray(value)) return value.map(remapReferences);
+        if (
+          value &&
+          typeof value === 'object' &&
+          Object.getPrototypeOf(value) === Object.prototype
+        ) {
+          return Object.fromEntries(
+            Object.entries(value).map(([key, item]) => [key, remapReferences(item)]),
+          );
+        }
+        return value;
+      };
+      await db.generatedAgents.bulkPut(
+        agents.map((agent) => ({ ...agent, id: agentIds.get(agent.id)!, stageId })),
+      );
+      await saveStageData(stageId, remapReferences(data) as StageStoreData);
+    },
+  );
+  return stageId;
+}
+
+/** Recovery uses existing non-indexed stage rows, so no schema upgrade is required. */
+export async function retainConflictDraft(id: string, payload: StageStoreData): Promise<void> {
+  const now = Date.now();
+  await db.stages.put({
+    id: `save-conflict:${id}`,
+    name: `${payload.stage.name} (unsaved draft)`,
+    createdAt: now,
+    updatedAt: now,
+    conflictDraft: { payload: structuredClone(payload) },
+  });
+}
+export async function loadConflictDrafts(): Promise<{ id: string; payload: StageStoreData }[]> {
+  return (await db.stages.toArray()).flatMap((row) =>
+    row.conflictDraft
+      ? [{ id: row.id.slice('save-conflict:'.length), payload: row.conflictDraft.payload }]
+      : [],
+  );
+}
+export async function deleteConflictDraft(id: string): Promise<void> {
+  await db.stages.delete(`save-conflict:${id}`);
 }

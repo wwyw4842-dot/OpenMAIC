@@ -1060,6 +1060,10 @@
   },
   "saveRecovery": {
     "message": "Your changes could not be saved. Keep this tab open and retry after freeing storage.",
-    "retry": "Retry saving"
+    "retry": "Retry saving",
+    "conflict": "“{{name}}” changed in another tab. Your draft is retained. Keep this tab open until it is saved as a copy.",
+    "readLatest": "Read latest (keep draft)",
+    "saveCopy": "Save draft as a copy",
+    "openCopy": "Copy saved. Open the copied classroom"
   }
 }

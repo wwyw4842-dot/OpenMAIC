@@ -45,7 +45,10 @@ afterEach(async () => {
 
 test('undo after switching classrooms restores only the active classroom', async () => {
   await saveStageData('A', classroom('A', 'A original'));
-  useStageStore.setState(classroom('A', 'A original'));
+  useStageStore.setState({
+    ...classroom('A', 'A original'),
+    stage: (await loadStageData('A'))!.stage,
+  });
   await useSnapshotStore.getState().initSnapshotDatabase();
   useStageStore.setState(classroom('B', 'B original'));
   await useSnapshotStore.getState().initSnapshotDatabase();
@@ -262,8 +265,15 @@ test('unmatched older history survives while the saved content starts a safe ses
   const record = (await db.stages.get('A'))!;
   const { snapshotCursor: _cursor, snapshotSessionId: _session, ...legacy } = record;
   await db.stages.put(legacy);
-  await saveStageData('A', classroom('A', 'unmatched saved content'));
-  useStageStore.setState(classroom('A', 'unmatched saved content'));
+  await saveStageData('A', {
+    ...classroom('A', 'unmatched saved content'),
+    contentRevision: (await loadStageData('A'))!.contentRevision,
+  });
+  useStageStore.setState({
+    ...classroom('A', 'unmatched saved content'),
+    stage: (await loadStageData('A'))!.stage,
+    persistenceOwner: null,
+  });
   useSnapshotStore.setState({ historyStageId: null, snapshotCursor: -1, snapshotLength: 0 });
   await useSnapshotStore.getState().initSnapshotDatabase();
   expect(useSnapshotStore.getState().canUndo()).toBe(false);

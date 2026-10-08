@@ -1,0 +1,9 @@
+# EDU-08 blocker follow-up — 2026-10-08
+
+Synchronized HyperClass and OpenMAIC cross-tab recovery behavior. OpenMAIC now clones generated agents with new IDs and remaps references when saving a retained conflict as a new classroom. Both stores capture owner/edit lineage around read-latest and conflict-copy awaits, retaining newer edits and avoiding unconditional cancellation of a newer owner's debounce.
+
+Regression coverage includes: edits during delayed copy, edits during delayed read-latest backup, copying an older retained draft after read-latest while a newer owner edit is pending, and cloned agent/media survival after source deletion. Local test execution was attempted after the worktree dependency directory was recreated by pnpm; the restricted network prevented dependency restoration, so pnpm itself could not run. Direct runners use a relative symlink to a healthy dependency directory for the same repository.
+
+Verification after the serialized recovery-draft queue: targeted `tests/store/stage-cross-tab.test.ts` passed 21/21 in HyperClass and 21/21 in OpenMAIC; TypeScript and Prettier checks passed in both. Full Vitest reached 819 passed in HyperClass and 510 passed in OpenMAIC, with two unrelated rich-text ownership suites failing in each run because the direct runner had no `localStorage` (`migrateFromOldStorage` called `localStorage.getItem`).
+
+The final 21-case targeted suite also delays the second read-latest backup while a third conflicted save starts, proving serialized recovery writes preserve the third draft. Full-suite counts above precede that one additional test. Real worktree Git metadata is outside current write permissions; equivalent commits were generated in a /tmp local clone from the exact original parent SHA, with only listed EDU-08 files staged.

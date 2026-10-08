@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { nanoid } from 'nanoid';
 import { db, type Snapshot } from '@/lib/utils/database';
 import type { StageStoreData } from '@/lib/utils/stage-storage';
-import { useStageStore } from './stage';
+import { useStageStore, captureStageSave } from './stage';
 import type { Scene } from '@/lib/types/stage';
 
 const SNAPSHOT_LIMIT = 20;
@@ -22,10 +22,6 @@ async function snapshotsFor(stageId: string, sessionId?: string): Promise<Snapsh
 function active(stageId: string, revision: number) {
   const state = useStageStore.getState();
   return state.stage?.id === stageId && state.editRevision === revision;
-}
-function capture(): StageStoreData | null {
-  const { stage, scenes, currentSceneId, chats, outlines } = useStageStore.getState();
-  return stage ? structuredClone({ stage, scenes, currentSceneId, chats, outlines }) : null;
 }
 function canonical(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonical);
@@ -66,7 +62,8 @@ async function initializeHistory(data: StageStoreData) {
       rows = [];
     }
   }
-  if (!rows.length) {
+  const created = !rows.length;
+  if (created) {
     sessionId ??= stageId;
     const first = {
       stageId,
@@ -80,7 +77,15 @@ async function initializeHistory(data: StageStoreData) {
   }
   data.snapshotCursor = cursor!;
   data.snapshotSessionId = sessionId ?? rows[0]?.sessionId ?? stageId;
-  return { rows, cursor: cursor!, sessionId: data.snapshotSessionId };
+  return {
+    rows,
+    cursor: cursor!,
+    sessionId: data.snapshotSessionId,
+    unchanged:
+      !created &&
+      record?.snapshotCursor === data.snapshotCursor &&
+      record?.snapshotSessionId === data.snapshotSessionId,
+  };
 }
 export interface SnapshotState {
   snapshotCursor: number;
@@ -98,7 +103,8 @@ export interface SnapshotState {
 export const useSnapshotStore = create<SnapshotState>((set, get) => {
   const move = (delta: number) => {
     const request = useStageStore.getState();
-    const payload = capture();
+    const captured = captureStageSave();
+    const payload = captured?.payload;
     const stageId = payload?.stage.id;
     if (!stageId || !payload) return Promise.resolve();
     return enqueueHistory(async () => {
@@ -108,6 +114,7 @@ export const useSnapshotStore = create<SnapshotState>((set, get) => {
       let length = 0;
       await request.saveToStorage({
         payload,
+        owner: captured!.owner,
         writeHistory: async (data) => {
           const record = await db.stages.get(stageId);
           const rows = await snapshotsFor(stageId, record?.snapshotSessionId);
@@ -152,7 +159,8 @@ export const useSnapshotStore = create<SnapshotState>((set, get) => {
     setSnapshotLength: (snapshotLength) => set({ snapshotLength }),
     initSnapshotDatabase: () => {
       const request = useStageStore.getState();
-      const payload = capture();
+      const captured = captureStageSave();
+      const payload = captured?.payload;
       if (!payload) return Promise.resolve();
       const stageId = payload.stage.id;
       return enqueueHistory(async () => {
@@ -160,12 +168,13 @@ export const useSnapshotStore = create<SnapshotState>((set, get) => {
         let length = 0;
         await request.saveToStorage({
           payload,
+          owner: captured!.owner,
           cancelPending: false,
           writeHistory: async (data) => {
             const history = await initializeHistory(data);
             cursor = history.cursor;
             length = history.rows.length;
-            return { metadataOnly: true };
+            return { metadataOnly: true, unchanged: history.unchanged };
           },
           onCommitted: () => {
             if (active(stageId, request.editRevision))
@@ -176,7 +185,8 @@ export const useSnapshotStore = create<SnapshotState>((set, get) => {
     },
     addSnapshot: () => {
       const request = useStageStore.getState();
-      const payload = capture();
+      const captured = captureStageSave();
+      const payload = captured?.payload;
       if (!payload) return Promise.resolve();
       const stageId = payload.stage.id;
       const index = payload.scenes.findIndex((scene) => scene.id === payload.currentSceneId);
@@ -184,6 +194,7 @@ export const useSnapshotStore = create<SnapshotState>((set, get) => {
         let length = 0;
         await request.saveToStorage({
           payload,
+          owner: captured!.owner,
           cancelPending: active(stageId, request.editRevision),
           writeHistory: async (data) => {
             const { rows, cursor, sessionId } = await initializeHistory(data);
@@ -207,7 +218,10 @@ export const useSnapshotStore = create<SnapshotState>((set, get) => {
             if (!active(stageId, request.editRevision)) return { metadataOnly: true };
           },
           onCommitted: () => {
-            if (useStageStore.getState().stage?.id === stageId)
+            if (
+              useStageStore.getState().stage?.id === stageId &&
+              useStageStore.getState().persistenceOwner === captured!.owner
+            )
               set({ historyStageId: stageId, snapshotCursor: length - 1, snapshotLength: length });
           },
         });
