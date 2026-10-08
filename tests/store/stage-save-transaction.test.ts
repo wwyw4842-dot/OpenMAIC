@@ -9,9 +9,13 @@ import * as storage from '@/lib/utils/stage-storage';
 import { useStageStore } from '@/lib/store/stage';
 
 const STAGE_ID = 'failure';
+let seededRevision: number | undefined;
 
 function stage(name: string): Stage {
-  return { id: STAGE_ID, name, createdAt: 1, updatedAt: 1 };
+  return Object.assign(
+    { id: STAGE_ID, name, createdAt: 1, updatedAt: 1 },
+    { contentRevision: name === 'B' ? undefined : seededRevision },
+  );
 }
 
 function scene(title: string): Scene {
@@ -58,9 +62,11 @@ async function seed() {
     currentSceneId: 'scene-1',
     chats: [chat('Existing chat')],
   });
+  seededRevision = (await loadStageData(STAGE_ID))!.contentRevision!;
 }
 
 beforeEach(async () => {
+  seededRevision = undefined;
   await db.delete();
   await db.open();
 });
@@ -95,6 +101,7 @@ test('scene write failure rolls back the previous classroom', async () => {
   try {
     await expect(
       saveStageData(STAGE_ID, {
+        contentRevision: seededRevision,
         stage: stage('Replacement'),
         scenes: [scene('Replacement')],
         currentSceneId: 'scene-1',
@@ -119,6 +126,7 @@ test('chat write failure rolls back the previous classroom', async () => {
   try {
     await expect(
       saveStageData(STAGE_ID, {
+        contentRevision: seededRevision,
         stage: stage('Replacement'),
         scenes: [scene('Replacement')],
         currentSceneId: 'scene-1',

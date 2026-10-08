@@ -361,3 +361,59 @@ test.describe('Classroom fixture schema readiness regression', () => {
     });
   });
 });
+
+test('production classroom entry rejects stale tab selection and opens retained draft copy', async ({
+  context,
+  page,
+}) => {
+  await context.addInitScript(() => localStorage.setItem('locale', 'en-US'));
+  await context.route('**/api/server-providers', (route) =>
+    route.fulfill({ json: { providers: [] } }),
+  );
+  await seedDatabase(page);
+  const a = new ClassroomPage(page);
+  await a.goto(TEST_STAGE_ID);
+  await expect(a.sidebarScenes).toHaveCount(3);
+  const saved = (tab: import('@playwright/test').Page) =>
+    tab.evaluate(async (id) => {
+      const database = await new Promise<IDBDatabase>((resolve, reject) => {
+        const req = indexedDB.open('MAIC-Database');
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+      const record = await new Promise<{
+        currentSceneId?: string;
+        snapshotCursor?: number;
+        contentRevision?: number;
+      }>((resolve, reject) => {
+        const req = database.transaction('stages').objectStore('stages').get(id);
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+      database.close();
+      return record;
+    }, TEST_STAGE_ID);
+  await expect.poll(async () => Number.isInteger((await saved(page)).snapshotCursor)).toBe(true);
+  const bPage = await context.newPage();
+  const b = new ClassroomPage(bPage);
+  await b.goto(TEST_STAGE_ID);
+  await expect(b.sidebarScenes).toHaveCount(3);
+  await a.clickScene(1);
+  await expect.poll(async () => (await saved(page)).currentSceneId).toBe('scene-1');
+  await b.clickScene(2);
+  await expect(bPage.getByRole('alert')).toContainText('changed in another tab');
+  expect((await saved(page)).currentSceneId).toBe('scene-1');
+  await bPage.reload();
+  await expect(b.sidebarScenes).toHaveCount(3);
+  await bPage.getByRole('button', { name: 'Read latest (keep draft)' }).click();
+  await expect(bPage.getByRole('heading', { name: '光反应' })).toBeVisible();
+  await bPage.getByRole('button', { name: 'Save draft as a copy' }).click();
+  await expect(bPage.getByRole('alert')).toBeHidden();
+  const link = bPage.getByRole('link', { name: 'Copy saved. Open the copied classroom' });
+  await expect(link).toBeVisible();
+  await link.click();
+  await expect(bPage).not.toHaveURL(new RegExp(`/classroom/${TEST_STAGE_ID}$`));
+  await expect(bPage.getByRole('heading', { name: '暗反应' })).toBeVisible();
+  await expect(b.sidebarScenes).toHaveCount(3);
+  expect((await saved(page)).currentSceneId).toBe('scene-1');
+});
