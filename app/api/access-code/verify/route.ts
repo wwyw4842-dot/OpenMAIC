@@ -1,28 +1,13 @@
 import { cookies } from 'next/headers';
 import { createHmac, timingSafeEqual } from 'crypto';
 import { apiError, apiSuccess } from '@/lib/server/api-response';
-import { ACCESS_TOKEN_MAX_AGE_SECONDS, parseAccessToken } from '@/lib/server/access-token-lifetime';
+import { ACCESS_TOKEN_MAX_AGE_SECONDS } from '@/lib/server/access-token-lifetime';
 
 /** Create an HMAC-signed token: `timestamp.signature` */
 function createAccessToken(accessCode: string): string {
   const timestamp = Date.now().toString();
   const signature = createHmac('sha256', accessCode).update(timestamp).digest('hex');
   return `${timestamp}.${signature}`;
-}
-
-/** Verify an HMAC-signed token against the access code */
-export function verifyAccessToken(token: string, accessCode: string): boolean {
-  const parsed = parseAccessToken(token);
-  if (!parsed) return false;
-  const { timestamp, signature } = parsed;
-
-  const expected = createHmac('sha256', accessCode).update(timestamp).digest('hex');
-
-  const sigBuf = Buffer.from(signature, 'hex');
-  const expBuf = Buffer.from(expected, 'hex');
-  if (sigBuf.length !== expBuf.length) return false;
-
-  return timingSafeEqual(sigBuf, expBuf);
 }
 
 export async function POST(request: Request) {
