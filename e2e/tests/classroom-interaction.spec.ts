@@ -1,3 +1,8 @@
+import {
+  prepareDatabaseSchema,
+  inspectDatabaseSchema,
+  injectFixtureWriteFailure,
+} from '../fixtures/schema-probe';
 import { test, expect } from '../fixtures/base';
 import { ClassroomPage } from '../pages/classroom.page';
 import { createSettingsStorage } from '../fixtures/test-data/settings';
@@ -14,14 +19,20 @@ async function seedDatabase(page: import('@playwright/test').Page) {
     localStorage.setItem('settings-storage', settings);
   }, SETTINGS_STORAGE);
 
-  // Navigate to home page first — this causes Dexie to open/create the DB at v8
-  // with the correct schema. We wait for network idle to ensure Dexie is done.
+  // Navigate first so Dexie can initialize v11 (native IndexedDB version 110).
+  // Poll an awaited result; an async waitForFunction predicate returns a truthy Promise.
   await page.goto('/', { waitUntil: 'networkidle' });
-  await page.waitForFunction(async () =>
-    (await indexedDB.databases()).some(
-      (db) => db.name === 'MAIC-Database' && Number(db.version) >= 110,
-    ),
-  );
+  await expect
+    .poll(
+      () =>
+        page.evaluate(async () =>
+          (await indexedDB.databases()).some(
+            (db) => db.name === 'MAIC-Database' && Number(db.version) >= 110,
+          ),
+        ),
+      { timeout: 5000, message: 'Dexie schema is not ready' },
+    )
+    .toBe(true);
 
   // Now seed data by opening the DB at its current version (no upgrade).
   // Opening without a version number returns the current version without triggering
@@ -35,6 +46,7 @@ async function seedDatabase(page: import('@playwright/test').Page) {
         request.onsuccess = (event) => {
           const db = (event.target as IDBOpenDBRequest).result;
           if (
+            db.version < 110 ||
             !['stages', 'scenes', 'stageOutlines'].every((name) =>
               db.objectStoreNames.contains(name),
             )
@@ -44,97 +56,103 @@ async function seedDatabase(page: import('@playwright/test').Page) {
             return;
           }
           const tx = db.transaction(['stages', 'scenes', 'stageOutlines'], 'readwrite');
-          const now = Date.now();
-
-          tx.objectStore('stages').put({
-            id: stageId,
-            name: '光合作用',
-            description: '',
-            language: 'zh-CN',
-            style: 'professional',
-            createdAt: now,
-            updatedAt: now,
-          });
-
-          // Scene content uses SlideContent shape: { type: 'slide', canvas: Slide }
-          const makeSlideContent = (title: string, elId: string) => ({
-            type: 'slide',
-            canvas: {
-              id: `slide-${elId}`,
-              viewportSize: 1000,
-              viewportRatio: 0.5625,
-              theme,
-              elements: [
-                {
-                  type: 'text',
-                  id: `el-${elId}`,
-                  content: title,
-                  left: 50,
-                  top: 50,
-                  width: 900,
-                  height: 100,
-                },
-              ],
-            },
-          });
-
-          const scenes = [
-            {
-              id: 'scene-0',
-              stageId,
-              type: 'slide',
-              title: '基本概念',
-              order: 0,
-              content: makeSlideContent('基本概念', '0'),
-              createdAt: now,
-              updatedAt: now,
-            },
-            {
-              id: 'scene-1',
-              stageId,
-              type: 'slide',
-              title: '光反应',
-              order: 1,
-              content: makeSlideContent('光反应', '1'),
-              createdAt: now,
-              updatedAt: now,
-            },
-            {
-              id: 'scene-2',
-              stageId,
-              type: 'slide',
-              title: '暗反应',
-              order: 2,
-              content: makeSlideContent('暗反应', '2'),
-              createdAt: now,
-              updatedAt: now,
-            },
-          ];
-          for (const scene of scenes) {
-            tx.objectStore('scenes').put(scene);
-          }
-
-          // Empty outlines = all scenes generated, no pending work
-          // StageOutlinesRecord requires createdAt + updatedAt
-          tx.objectStore('stageOutlines').put({
-            stageId,
-            outlines: [],
-            createdAt: now,
-            updatedAt: now,
-          });
-
+          let writeError: unknown;
           tx.oncomplete = () => {
             db.close();
             resolve();
           };
-          tx.onerror = () => {
-            db.close();
-            reject(tx.error);
-          };
           tx.onabort = () => {
             db.close();
-            reject(tx.error || new Error('Fixture transaction aborted'));
+            reject(writeError || tx.error || new Error('Fixture transaction aborted'));
           };
+          try {
+            const now = Date.now();
+
+            tx.objectStore('stages').put({
+              id: stageId,
+              name: '光合作用',
+              description: '',
+              language: 'zh-CN',
+              style: 'professional',
+              createdAt: now,
+              updatedAt: now,
+            });
+
+            // Scene content uses SlideContent shape: { type: 'slide', canvas: Slide }
+            const makeSlideContent = (title: string, elId: string) => ({
+              type: 'slide',
+              canvas: {
+                id: `slide-${elId}`,
+                viewportSize: 1000,
+                viewportRatio: 0.5625,
+                theme,
+                elements: [
+                  {
+                    type: 'text',
+                    id: `el-${elId}`,
+                    content: title,
+                    left: 50,
+                    top: 50,
+                    width: 900,
+                    height: 100,
+                  },
+                ],
+              },
+            });
+
+            const scenes = [
+              {
+                id: 'scene-0',
+                stageId,
+                type: 'slide',
+                title: '基本概念',
+                order: 0,
+                content: makeSlideContent('基本概念', '0'),
+                createdAt: now,
+                updatedAt: now,
+              },
+              {
+                id: 'scene-1',
+                stageId,
+                type: 'slide',
+                title: '光反应',
+                order: 1,
+                content: makeSlideContent('光反应', '1'),
+                createdAt: now,
+                updatedAt: now,
+              },
+              {
+                id: 'scene-2',
+                stageId,
+                type: 'slide',
+                title: '暗反应',
+                order: 2,
+                content: makeSlideContent('暗反应', '2'),
+                createdAt: now,
+                updatedAt: now,
+              },
+            ];
+            for (const scene of scenes) {
+              tx.objectStore('scenes').put(scene);
+            }
+
+            // Empty outlines = all scenes generated, no pending work
+            // StageOutlinesRecord requires createdAt + updatedAt
+            tx.objectStore('stageOutlines').put({
+              stageId,
+              outlines: [],
+              createdAt: now,
+              updatedAt: now,
+            });
+          } catch (error) {
+            writeError = error;
+            try {
+              tx.abort();
+            } catch {
+              db.close();
+              reject(error);
+            }
+          }
         };
 
         request.onerror = () => reject(request.error);
@@ -299,5 +317,47 @@ test.describe('Classroom Interaction', () => {
     await expect(page.locator('[data-testid="scene-item"]')).toHaveCount(1);
     await expect(page.getByRole('heading', { name: 'Server scene' })).toBeVisible();
     expect(serverLoads).toBe(1);
+  });
+});
+
+test.describe('Classroom fixture schema readiness regression', () => {
+  const stores = ['stages', 'scenes', 'stageOutlines'];
+
+  test('rejects an old version with zero fixture writes', async ({ page }) => {
+    await prepareDatabaseSchema(page, 100, stores);
+    await expect(seedDatabase(page)).rejects.toThrow('Dexie schema is not ready');
+    expect(await inspectDatabaseSchema(page)).toEqual({
+      version: 100,
+      counts: { stages: 0, scenes: 0, stageOutlines: 0 },
+    });
+  });
+
+  test('rejects a missing store with zero fixture writes', async ({ page }) => {
+    await prepareDatabaseSchema(page, 110, ['stages', 'scenes']);
+    await expect(seedDatabase(page)).rejects.toThrow('Dexie schema is not ready');
+    expect(await inspectDatabaseSchema(page)).toEqual({
+      version: 110,
+      counts: { stages: 0, scenes: 0 },
+    });
+  });
+
+  test('resolves only after the fixture transaction commits', async ({ page }) => {
+    await prepareDatabaseSchema(page, 110, stores);
+    await seedDatabase(page);
+    expect(await inspectDatabaseSchema(page)).toEqual({
+      version: 110,
+      counts: { stages: 1, scenes: 3, stageOutlines: 1 },
+    });
+  });
+
+  test('rejects a synchronous write failure and rolls back all stores', async ({ page }) => {
+    test.setTimeout(8000);
+    await prepareDatabaseSchema(page, 110, stores);
+    await injectFixtureWriteFailure(page);
+    await expect(seedDatabase(page)).rejects.toThrow('Injected fixture write failure');
+    expect(await inspectDatabaseSchema(page)).toEqual({
+      version: 110,
+      counts: { stages: 0, scenes: 0, stageOutlines: 0 },
+    });
   });
 });
