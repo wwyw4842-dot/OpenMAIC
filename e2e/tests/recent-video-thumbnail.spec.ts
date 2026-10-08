@@ -1,3 +1,8 @@
+import {
+  prepareDatabaseSchema,
+  inspectDatabaseSchema,
+  injectFixtureWriteFailure,
+} from '../fixtures/schema-probe';
 import type { Page } from '@playwright/test';
 import { test, expect } from '../fixtures/base';
 import { defaultTheme } from '../fixtures/test-data/scene-content';
@@ -30,7 +35,17 @@ async function seedVideoThumbnailStage({
   extraStoredMediaRefs?: string[];
 }) {
   await page.goto('/', { waitUntil: 'networkidle' });
-  await page.waitForFunction(async () => (await indexedDB.databases()).some((db) => db.name === 'MAIC-Database' && Number(db.version) >= 110));
+  await expect
+    .poll(
+      () =>
+        page.evaluate(async () =>
+          (await indexedDB.databases()).some(
+            (db) => db.name === 'MAIC-Database' && Number(db.version) >= 110,
+          ),
+        ),
+      { timeout: 5000, message: 'Dexie schema is not ready' },
+    )
+    .toBe(true);
 
   await page.evaluate(
     ({
@@ -48,100 +63,121 @@ async function seedVideoThumbnailStage({
 
         request.onsuccess = (event) => {
           const db = (event.target as IDBOpenDBRequest).result;
-          if (!["stages", "scenes", "stageOutlines"].every((name) => db.objectStoreNames.contains(name))) { db.close(); reject(new Error("Dexie schema is not ready")); return; }
+          if (
+            db.version < 110 ||
+            !['stages', 'scenes', 'stageOutlines', 'mediaFiles'].every((name) =>
+              db.objectStoreNames.contains(name),
+            )
+          ) {
+            db.close();
+            reject(new Error('Dexie schema is not ready'));
+            return;
+          }
           const tx = db.transaction(
             ['stages', 'scenes', 'stageOutlines', 'mediaFiles'],
             'readwrite',
           );
-          const now = Date.now();
-          const videoBytes = new Uint8Array([
-            0, 0, 0, 24, 102, 116, 121, 112, 109, 112, 52, 50, 0, 0, 0, 0, 109, 112, 52, 50, 105,
-            115, 111, 109,
-          ]);
-          const posterBytes = Uint8Array.from(atob(posterBase64), (char) => char.charCodeAt(0));
-          const videoBlob = new Blob([videoBytes], { type: 'video/mp4' });
-          const posterBlob = new Blob([posterBytes], { type: 'image/png' });
-          const failedVideoBlob = new Blob([], { type: 'video/mp4' });
-
-          const putVideoRecord = (mediaRef: string, error?: string) => {
-            const blob = error ? failedVideoBlob : videoBlob;
-            tx.objectStore('mediaFiles').put({
-              id: `${stageId}:${mediaRef}`,
-              stageId,
-              type: 'video',
-              blob,
-              mimeType: 'video/mp4',
-              size: blob.size,
-              poster: error ? undefined : posterBlob,
-              prompt: 'A generated classroom video preview',
-              params: '{}',
-              error,
-              createdAt: now,
-            });
-          };
-
-          tx.objectStore('stages').put({
-            id: stageId,
-            name: courseName,
-            description: '',
-            language: 'en-US',
-            style: 'professional',
-            createdAt: now,
-            updatedAt: now,
-          });
-
-          tx.objectStore('scenes').put({
-            id: 'scene-video-thumbnail',
-            stageId,
-            type: 'slide',
-            title: 'Video preview',
-            order: 0,
-            content: {
-              type: 'slide',
-              canvas: {
-                id: 'slide-video-thumbnail',
-                viewportSize: 1000,
-                viewportRatio: 0.5625,
-                theme,
-                background: { type: 'solid', color: '#111827' },
-                elements: [
-                  {
-                    id: 'video-el',
-                    type: 'video',
-                    src: slideMediaRef,
-                    mediaRef: slideMediaRef,
-                    left: 0,
-                    top: 0,
-                    width: 1000,
-                    height: 562.5,
-                    rotate: 0,
-                    autoplay: false,
-                  },
-                ],
-              },
-            },
-            createdAt: now,
-            updatedAt: now,
-          });
-
-          tx.objectStore('stageOutlines').put({
-            stageId,
-            outlines: [],
-            createdAt: now,
-            updatedAt: now,
-          });
-
-          putVideoRecord(storedMediaRef, storedError);
-          for (const mediaRef of extraStoredMediaRefs) {
-            putVideoRecord(mediaRef);
-          }
-
+          let writeError: unknown;
           tx.oncomplete = () => {
             db.close();
             resolve();
           };
-          tx.onerror = () => { db.close(); reject(tx.error); };
-          tx.onabort = () => { db.close(); reject(tx.error || new Error("Fixture transaction aborted")); };
+          tx.onabort = () => {
+            db.close();
+            reject(writeError || tx.error || new Error('Fixture transaction aborted'));
+          };
+          try {
+            const now = Date.now();
+            const videoBytes = new Uint8Array([
+              0, 0, 0, 24, 102, 116, 121, 112, 109, 112, 52, 50, 0, 0, 0, 0, 109, 112, 52, 50, 105,
+              115, 111, 109,
+            ]);
+            const posterBytes = Uint8Array.from(atob(posterBase64), (char) => char.charCodeAt(0));
+            const videoBlob = new Blob([videoBytes], { type: 'video/mp4' });
+            const posterBlob = new Blob([posterBytes], { type: 'image/png' });
+            const failedVideoBlob = new Blob([], { type: 'video/mp4' });
+
+            const putVideoRecord = (mediaRef: string, error?: string) => {
+              const blob = error ? failedVideoBlob : videoBlob;
+              tx.objectStore('mediaFiles').put({
+                id: `${stageId}:${mediaRef}`,
+                stageId,
+                type: 'video',
+                blob,
+                mimeType: 'video/mp4',
+                size: blob.size,
+                poster: error ? undefined : posterBlob,
+                prompt: 'A generated classroom video preview',
+                params: '{}',
+                error,
+                createdAt: now,
+              });
+            };
+
+            tx.objectStore('stages').put({
+              id: stageId,
+              name: courseName,
+              description: '',
+              language: 'en-US',
+              style: 'professional',
+              createdAt: now,
+              updatedAt: now,
+            });
+
+            tx.objectStore('scenes').put({
+              id: 'scene-video-thumbnail',
+              stageId,
+              type: 'slide',
+              title: 'Video preview',
+              order: 0,
+              content: {
+                type: 'slide',
+                canvas: {
+                  id: 'slide-video-thumbnail',
+                  viewportSize: 1000,
+                  viewportRatio: 0.5625,
+                  theme,
+                  background: { type: 'solid', color: '#111827' },
+                  elements: [
+                    {
+                      id: 'video-el',
+                      type: 'video',
+                      src: slideMediaRef,
+                      mediaRef: slideMediaRef,
+                      left: 0,
+                      top: 0,
+                      width: 1000,
+                      height: 562.5,
+                      rotate: 0,
+                      autoplay: false,
+                    },
+                  ],
+                },
+              },
+              createdAt: now,
+              updatedAt: now,
+            });
+
+            tx.objectStore('stageOutlines').put({
+              stageId,
+              outlines: [],
+              createdAt: now,
+              updatedAt: now,
+            });
+
+            putVideoRecord(storedMediaRef, storedError);
+            for (const mediaRef of extraStoredMediaRefs) {
+              putVideoRecord(mediaRef);
+            }
+          } catch (error) {
+            writeError = error;
+            try {
+              tx.abort();
+            } catch {
+              db.close();
+              reject(error);
+            }
+          }
         };
 
         request.onerror = () => reject(request.error);
@@ -160,7 +196,17 @@ async function seedVideoThumbnailStage({
   );
 
   await page.goto('/', { waitUntil: 'networkidle' });
-  await page.waitForFunction(async () => (await indexedDB.databases()).some((db) => db.name === 'MAIC-Database' && Number(db.version) >= 110));
+  await expect
+    .poll(
+      () =>
+        page.evaluate(async () =>
+          (await indexedDB.databases()).some(
+            (db) => db.name === 'MAIC-Database' && Number(db.version) >= 110,
+          ),
+        ),
+      { timeout: 5000, message: 'Dexie schema is not ready' },
+    )
+    .toBe(true);
 }
 
 test.describe('Home recent video thumbnails', () => {
@@ -235,5 +281,50 @@ test.describe('Home recent video thumbnails', () => {
 
     await expect(card.locator('[data-testid="thumbnail-video-indicator"]')).toBeVisible();
     await expect(card.locator('[data-video-element] video')).toHaveCount(0);
+  });
+});
+
+test.describe('Video thumbnail fixture schema readiness regression', () => {
+  const stores = ['stages', 'scenes', 'stageOutlines', 'mediaFiles'];
+
+  test('rejects an old version with zero fixture writes', async ({ page }) => {
+    await prepareDatabaseSchema(page, 100, stores);
+    await expect(seedVideoThumbnailStage({ page })).rejects.toThrow('Dexie schema is not ready');
+    expect(await inspectDatabaseSchema(page)).toEqual({
+      version: 100,
+      counts: { stages: 0, scenes: 0, stageOutlines: 0, mediaFiles: 0 },
+    });
+  });
+
+  test('rejects a missing media store with zero fixture writes', async ({ page }) => {
+    test.setTimeout(8000);
+    await prepareDatabaseSchema(page, 110, ['stages', 'scenes', 'stageOutlines']);
+    await expect(seedVideoThumbnailStage({ page })).rejects.toThrow('Dexie schema is not ready');
+    expect(await inspectDatabaseSchema(page)).toEqual({
+      version: 110,
+      counts: { stages: 0, scenes: 0, stageOutlines: 0 },
+    });
+  });
+
+  test('resolves only after all fixture stores commit', async ({ page }) => {
+    await prepareDatabaseSchema(page, 110, stores);
+    await seedVideoThumbnailStage({ page });
+    expect(await inspectDatabaseSchema(page)).toEqual({
+      version: 110,
+      counts: { stages: 1, scenes: 1, stageOutlines: 1, mediaFiles: 1 },
+    });
+  });
+
+  test('rejects a synchronous write failure and rolls back all stores', async ({ page }) => {
+    test.setTimeout(8000);
+    await prepareDatabaseSchema(page, 110, stores);
+    await injectFixtureWriteFailure(page);
+    await expect(seedVideoThumbnailStage({ page })).rejects.toThrow(
+      'Injected fixture write failure',
+    );
+    expect(await inspectDatabaseSchema(page)).toEqual({
+      version: 110,
+      counts: { stages: 0, scenes: 0, stageOutlines: 0, mediaFiles: 0 },
+    });
   });
 });

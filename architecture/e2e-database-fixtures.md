@@ -1,0 +1,7 @@
+# Browser database fixture readiness
+
+Classroom and recent-video thumbnail fixtures navigate to the application so Dexie can initialize its current schema. The fixture waits at most five seconds for native MAIC-Database version 110 (Dexie v11) using an awaited Playwright expect.poll callback. Async callbacks must not be used with waitForFunction: the installed Playwright implementation treats a returned Promise as truthy before inspecting its resolved value.
+
+Every fixture also checks the version and every store it will write using the same database connection that creates the transaction. The video fixture includes mediaFiles. Fixture writes resolve only after transaction completion. A synchronous write error aborts the transaction and rejects with its original cause after abort, so a partially seeded database cannot pass setup.
+
+Self-tests live beside the original browser scenarios and call the actual seed functions. The schema-probe helper routes the entire page to a static HTTP document while retaining native IndexedDB, preventing the application from repairing an intentionally wrong schema. These are fixture self-tests, not product-schema migration acceptance. They verify an old version with otherwise complete stores, a missing required store, successful transaction completion, and rollback after a synchronous write exception. Product schema, existing browser scenario assertions, and migration guarantees are unchanged by this test-only repair.
