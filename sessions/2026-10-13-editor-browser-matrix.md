@@ -1,0 +1,11 @@
+# EDU-04/05/08 editor transaction and browser follow-up
+
+The current main baseline preserves the existing save transaction, undo ownership, revision CAS, and classroom recovery fixes. A fresh Chromium 145.0.7632.6 probe succeeded; the earlier MachPort blocker no longer applies to this environment. The original five cross-tab browser cases pass on both repository baselines.
+
+Three independent locked-library failures were preserved before product changes: empty Ctrl-Z then an ordinary non-keyboard transaction; Shift+Z followed by an ordinary transaction; and actual programmatic undo/redo. Each repository ran the same nine unit cases separately: six original passes and three new failures, then nine passes with the minimal metadata fix. The dependency lock is unchanged.
+
+The first browser matrix is diagnostic evidence, not the final candidate gate. HyperClass had one failure after scene switch; OpenMAIC additionally exposed unchanged-chat hydration and skipped snapshot creation after empty undo. New-owner actions now establish actual DOM replacement, while a separate same-turn old-node undo control preserves the race boundary instead of hiding it with a delay. The raw first runs and all original failures remain in the coordination workspace under `work/edu08-browser-evidence-20261013/`. OpenMAIC's unchanged-chat guard is handled by a separate reviewed mechanism/PR.
+
+The new private-source gate requires actual DOM/store/durable reload agreement and retains existing tests. Final browser results, CI, review, merge, and deployment must be recorded separately. No credentials, provider accounts, user databases, installed application, Roman, Lychee, or Notion were accessed.
+
+The local combined candidate (chat-hydration guard plus transaction metadata) passed all nine unit cases and nineteen of twenty actual Chromium cases. All seven new DOM cases passed; the sole failure was the existing classroom test matching both the conflict alert and Next's empty route announcer. The unchanged recovery text really appeared. HyperClass already scopes those two locators; the exact locator port is a separate OpenMAIC hydration-PR test commit. Final combined CI must verify all twenty cases after that dependency is integrated. This is not reported as a full local browser pass.

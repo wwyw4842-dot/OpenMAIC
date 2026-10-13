@@ -12,6 +12,7 @@ import { debounce } from 'lodash';
 import { useKeyboardStore, useCanvasStore } from '@/lib/store';
 import type { EditorView } from 'prosemirror-view';
 import { EditorState } from 'prosemirror-state';
+import { isHistoryTransaction } from 'prosemirror-history';
 import { toggleMark, wrapIn, lift } from 'prosemirror-commands';
 import { initProsemirrorEditor, createDocument } from '@/lib/prosemirror';
 import {
@@ -34,7 +35,6 @@ import { toggleList } from '@/lib/prosemirror/commands/toggleList';
 import { setListStyle } from '@/lib/prosemirror/commands/setListStyle';
 import { replaceText } from '@/lib/prosemirror/commands/replaceText';
 import type { TextFormatPainterKeys } from '@/lib/types/edit';
-import { KEYS } from '@/configs/hotkey';
 import { toast } from 'sonner';
 
 export interface ProsemirrorEditorProps {
@@ -88,7 +88,6 @@ export const ProsemirrorEditor = forwardRef<ProsemirrorEditorRef, ProsemirrorEdi
 
     const callbacks = useRef({ value, onUpdate });
     const syncingContent = useRef(false);
-    const historyCommand = useRef(false);
     useLayoutEffect(() => {
       callbacks.current = { value, onUpdate };
     }, [value, onUpdate]);
@@ -138,20 +137,11 @@ export const ProsemirrorEditor = forwardRef<ProsemirrorEditorRef, ProsemirrorEdi
       [defaultColor, defaultFontName, setRichtextAttrs],
     );
 
-    // Handle keydown
-    const handleKeydown = useCallback(
-      (view: EditorView, e: KeyboardEvent) => {
-        const { ctrlKey, shiftKey, metaKey } = e;
-        const ctrlActive = ctrlKey || shiftKey || metaKey;
-        const key = e.key.toUpperCase();
-
-        const isHandleHistory = ctrlActive && (key === KEYS.Z || key === KEYS.Y);
-
-        historyCommand.current = isHandleHistory;
-        handleClick();
-      },
-      [handleInput, handleClick],
-    );
+    // History is identified on the transaction itself. A keydown can produce
+    // no transaction, and undo/redo can also be invoked without a keydown.
+    const handleKeydown = useCallback(() => {
+      handleClick();
+    }, [handleClick]);
 
     // Execute rich text command
     const execCommand = useCallback(
@@ -403,8 +393,7 @@ export const ProsemirrorEditor = forwardRef<ProsemirrorEditorRef, ProsemirrorEdi
           const view = editorView.current;
           if (!view) return;
           view.updateState(view.state.apply(transaction));
-          if (transaction.docChanged) handleInput(historyCommand.current);
-          historyCommand.current = false;
+          if (transaction.docChanged) handleInput(isHistoryTransaction(transaction));
         },
       });
 

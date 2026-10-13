@@ -1,0 +1,38 @@
+name: Editor ownership browser acceptance
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  editor-browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec playwright install chromium --with-deps
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/editor-playwright
+      - name: Real editor DOM, IndexedDB, history, and actual classroom entry
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/editor-playwright
+          EDU08_REPORT_DIR: ${{ runner.temp }}/editor-acceptance
+        run: python3 scripts/test-editor-acceptance.py
+      - name: Preserve per-test reports and build logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: editor-acceptance
+          path: ${{ runner.temp }}/editor-acceptance/
+          if-no-files-found: error
+          retention-days: 14

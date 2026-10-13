@@ -112,3 +112,43 @@ test('external undo resets local history so Ctrl-Z cannot resurrect the replaced
   await act(async () => expect(redo(view.state, view.dispatch)).toBe(true));
   expect(view.dom.textContent).toBe('new original');
 });
+
+for (const shortcut of [
+  { name: 'empty undo', key: 'z', ctrlKey: true },
+  { name: 'ordinary uppercase Z', key: 'Z', shiftKey: true },
+]) {
+  test(`${shortcut.name} cannot classify a later ordinary input as a history transaction`, async () => {
+    const onUpdate = vi.fn();
+    await render('<p>original</p>', onUpdate);
+    const view = current.view!;
+    expect(undo(view.state, view.dispatch)).toBe(false);
+    await act(async () => {
+      view.dom.dispatchEvent(new KeyboardEvent('keydown', { ...shortcut, bubbles: true }));
+      // Paste/input-method edits can dispatch without a new keydown. This is a
+      // genuine non-history ProseMirror transaction after an unhandled shortcut.
+      view.dispatch(view.state.tr.insertText('new ', 1));
+    });
+    expect(view.dom.textContent).toBe('new original');
+    expect(onUpdate).toHaveBeenCalledTimes(1);
+    expect(onUpdate.mock.calls[0][0].ignore).toBe(false);
+    expect(onUpdate.mock.calls[0][0].value).toContain('new original');
+  });
+}
+
+test('programmatic undo and redo use actual history transaction metadata', async () => {
+  const onUpdate = vi.fn();
+  await render('<p>original</p>', onUpdate);
+  const view = current.view!;
+  vi.spyOn(
+    view as unknown as { scrollToSelection: () => void },
+    'scrollToSelection',
+  ).mockImplementation(() => {});
+  await act(async () => view.dispatch(view.state.tr.insertText('new ', 1)));
+  expect(onUpdate.mock.calls.at(-1)![0].ignore).toBe(false);
+  await act(async () => expect(undo(view.state, view.dispatch)).toBe(true));
+  expect(onUpdate.mock.calls.at(-1)![0].ignore).toBe(true);
+  expect(view.dom.textContent).toBe('original');
+  await act(async () => expect(redo(view.state, view.dispatch)).toBe(true));
+  expect(onUpdate.mock.calls.at(-1)![0].ignore).toBe(true);
+  expect(view.dom.textContent).toBe('new original');
+});
