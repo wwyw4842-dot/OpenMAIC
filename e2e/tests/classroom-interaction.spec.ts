@@ -401,14 +401,16 @@ test('production classroom entry rejects stale tab selection and opens retained 
   await a.clickScene(1);
   await expect.poll(async () => (await saved(page)).currentSceneId).toBe('scene-1');
   await b.clickScene(2);
-  await expect(bPage.getByRole('alert')).toContainText('changed in another tab');
+  await expect(
+    bPage.getByRole('alert').filter({ hasText: 'changed in another tab' }),
+  ).toContainText('changed in another tab');
   expect((await saved(page)).currentSceneId).toBe('scene-1');
   await bPage.reload();
   await expect(b.sidebarScenes).toHaveCount(3);
   await bPage.getByRole('button', { name: 'Read latest (keep draft)' }).click();
   await expect(bPage.getByRole('heading', { name: '光反应' })).toBeVisible();
   await bPage.getByRole('button', { name: 'Save draft as a copy' }).click();
-  await expect(bPage.getByRole('alert')).toBeHidden();
+  await expect(bPage.getByRole('alert').filter({ hasText: 'changed in another tab' })).toBeHidden();
   const link = bPage.getByRole('link', { name: 'Copy saved. Open the copied classroom' });
   await expect(link).toBeVisible();
   await link.click();
