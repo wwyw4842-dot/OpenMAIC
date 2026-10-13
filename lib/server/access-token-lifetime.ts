@@ -5,7 +5,11 @@ export function parseAccessToken(token: string, now = Date.now()) {
   const match = /^([1-9]\d{0,15})\.([a-f0-9]{64})$/.exec(token);
   if (!match) return null;
   const issuedAt = Number(match[1]);
-  if (!Number.isSafeInteger(issuedAt) || issuedAt > now || now - issuedAt >= ACCESS_TOKEN_MAX_AGE_SECONDS * 1000) {
+  if (
+    !Number.isSafeInteger(issuedAt) ||
+    issuedAt > now ||
+    now - issuedAt >= ACCESS_TOKEN_MAX_AGE_SECONDS * 1000
+  ) {
     return null;
   }
   return { timestamp: match[1], signature: match[2] };

@@ -8,7 +8,12 @@
 import type { NextRequest } from 'next/server';
 import { getModel, parseModelString, type ModelWithInfo } from '@/lib/ai/providers';
 import type { ThinkingConfig } from '@/lib/types/provider';
-import { resolveApiKey, resolveBaseUrl, resolveProxy, assertServerModelAllowed } from '@/lib/server/provider-config';
+import {
+  resolveApiKey,
+  resolveBaseUrl,
+  resolveProxy,
+  assertServerModelAllowed,
+} from '@/lib/server/provider-config';
 import { validateUrlForSSRF } from '@/lib/server/ssrf-guard';
 
 export interface ResolvedModel extends ModelWithInfo {
