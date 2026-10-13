@@ -226,6 +226,11 @@ const useStageStoreBase = create<StageState>()((set, get) => ({
   },
 
   setChats: (chats) => {
+    // Chat hydration maps the array but keeps unchanged session objects. Opening
+    // another tab must not advance the persisted revision for this read alone.
+    const previous = get().chats;
+    if (previous.length === chats.length && chats.every((chat, index) => chat === previous[index]))
+      return;
     set((state) => ({ chats, editRevision: state.editRevision + 1 }));
     debouncedSave();
   },
