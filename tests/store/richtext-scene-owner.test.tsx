@@ -119,11 +119,16 @@ afterEach(async () => {
 });
 for (const owner of ['scene', 'stage'] as const) {
   test(`identical HTML and element IDs have isolated history after ${owner} switch`, async () => {
-    useStageStore.setState({
-      stage: { id: 'A', name: 'A', createdAt: 1, updatedAt: 1 },
-      scenes: [scene('one', 'A', '<p>original</p>'), scene('two', 'A', '<p>edited original</p>')],
-      currentSceneId: 'one',
-    });
+    // Use the same owner-establishing actions as generation and server loading.
+    // Raw setState would leave the preceding classroom's persistence owner.
+    useStageStore.getState().setStage({ id: 'A', name: 'A', createdAt: 1, updatedAt: 1 });
+    useStageStore
+      .getState()
+      .setScenes([
+        scene('one', 'A', '<p>original</p>'),
+        scene('two', 'A', '<p>edited original</p>'),
+      ]);
+    useStageStore.getState().setCurrentSceneId('one');
     host = document.createElement('div');
     document.body.append(host);
     root = createRoot(host);
@@ -137,12 +142,11 @@ for (const owner of ['scene', 'stage'] as const) {
     expect(previous.dom.textContent).toBe('edited original');
     await act(async () => {
       if (owner === 'scene') useStageStore.getState().setCurrentSceneId('two');
-      else
-        useStageStore.setState({
-          stage: { id: 'B', name: 'B', createdAt: 1, updatedAt: 1 },
-          scenes: [scene('one', 'B', '<p>edited original</p>')],
-          currentSceneId: 'one',
-        });
+      else {
+        useStageStore.getState().setStage({ id: 'B', name: 'B', createdAt: 1, updatedAt: 1 });
+        useStageStore.getState().setScenes([scene('one', 'B', '<p>edited original</p>')]);
+        useStageStore.getState().setCurrentSceneId('one');
+      }
     });
     const next = current.view!;
     vi.spyOn(

@@ -1,0 +1,11 @@
+# EDU-08 reload lineage follow-up
+
+The previous metadata fix remains separate. Reading supported load and storage contracts identified a remaining owner boundary: force reload preserves stage/scene IDs and can preserve the HTML, while changing the client persistence owner.
+
+Before this patch, each repository independently ran six real provider/history/store cases: two valid same-owner cases passed and four stale-lineage cases failed. The guard-only candidate passed all fifteen unit cases including the prior nine. Actual Chromium on the original HC source additionally reproduced old same-stack undo/paste writing into the reloaded store (paste appended a snapshot), and same-HTML reload retaining the old local editor history. Raw source manifests and failures are retained in the coordination workspace. The first browser expectation hard-coded paragraph serialization; final coverage compares the exact pre-event element instead, preserving incidental style attributes and still detecting every body change. The independent OM baseline and final candidate evidence use that corrected expectation.
+
+The patch guards the scene callback and snapshot/undo/redo hook by the captured owner and stage, and keys the provider children by owner ID. No schema, public action signature, transaction implementation, or baseline assertion changes. Normal saves do not change that key.
+
+Final exact-source browser results, CI, review, merge and actual delivery are separate receipts. This source-only fix does not establish production deployment or close all remaining education scope. Unknown untracked duplicate files are excluded from explicit staging and fixture manifests.
+
+The first keyed candidate ran 14/15 unit cases and did not start the build or browser phase. The existing scene-owner fixture used raw `setState` to move from A to B while retaining A's owner. Its first B edit then created B's owner and retired the fixture's held editor. A production-source caller audit found actual stage transitions use `setStage`/`loadFromStorage` (the browser Stage API delegates to those actions). The fixture now uses those real actions for initialization and the cross-stage branch. Every original assertion and the scene-switch branch are unchanged; this is a fixture prerequisite correction, not a new raw-setState protocol. The failed run remains archived.

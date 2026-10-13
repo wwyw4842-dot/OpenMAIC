@@ -43,6 +43,8 @@ export function SceneProvider({ children }: { children: React.ReactNode }) {
   });
 
   const updateScene = useStageStore((state) => state.updateScene);
+  const stageId = useStageStore((state) => state.stage?.id);
+  const persistenceOwner = useStageStore((state) => state.persistenceOwner);
 
   const sceneId = currentScene?.id || '';
   const sceneType = currentScene?.type || 'slide';
@@ -72,14 +74,23 @@ export function SceneProvider({ children }: { children: React.ReactNode }) {
   // Update scene data with Immer
   const updateSceneData = useCallback(
     (updater: (draft: unknown) => void) => {
-      if (!currentScene) return;
+      const active = useStageStore.getState();
+      // Navigation and an explicit reload replace the client lineage before
+      // React can retire the previous editor/callback. IDs alone are not owners.
+      if (
+        !currentScene ||
+        currentScene.stageId !== stageId ||
+        active.stage?.id !== stageId ||
+        active.persistenceOwner !== persistenceOwner
+      )
+        return;
 
       const newContent = produce(currentScene.content, updater);
       updateScene(currentScene.id, {
         content: newContent,
       });
     },
-    [currentScene, updateScene],
+    [currentScene, updateScene, stageId, persistenceOwner],
   );
 
   const value = useMemo(
@@ -99,7 +110,13 @@ export function SceneProvider({ children }: { children: React.ReactNode }) {
     return null;
   }
 
-  return <SceneContext.Provider value={value}>{children}</SceneContext.Provider>;
+  // Even identical scene IDs/content after reload belong to a fresh editor
+  // lineage. Ordinary saves mutate owner.revision, keeping this key stable.
+  return (
+    <SceneContext.Provider key={persistenceOwner?.id ?? stageId} value={value}>
+      {children}
+    </SceneContext.Provider>
+  );
 }
 
 /**

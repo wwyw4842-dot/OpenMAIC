@@ -16,8 +16,8 @@ import xml.etree.ElementTree as ET
 ROOT = Path(__file__).resolve().parent.parent
 REPORT_PARENT = Path(os.environ.get("EDU08_REPORT_DIR", tempfile.gettempdir())).resolve()
 REPORT_PARENT.mkdir(parents=True, exist_ok=True)
-OUT = Path(tempfile.mkdtemp(prefix="editor-acceptance-", dir=REPORT_PARENT))
-WORK = Path(tempfile.mkdtemp(prefix="edu08-source-"))
+OUT = Path(tempfile.mkdtemp(prefix="editor-lineage-", dir=REPORT_PARENT))
+WORK = Path(tempfile.mkdtemp(prefix="edu08-lineage-source-"))
 SOURCE = WORK / "source"
 SOURCE.mkdir()
 HOME = OUT / "home"
@@ -32,9 +32,9 @@ if not NODE:
 
 # Explicit owned untracked files support the local pre-commit gate; CI uses the
 # same tracked files. Never copy arbitrary untracked files or environment files.
-EXTRAS = ["e2e/fixtures/editor-matrix-runtime.tsx", "e2e/acceptance/editor-persistence-matrix.spec.ts", "scripts/test-editor-acceptance.py"]
-SELECTED = ["tests/classroom-interaction.spec.ts", "tests/stage-cross-tab.spec.ts", "acceptance/editor-persistence-matrix.spec.ts"]
-summary = {"status": "incomplete", "source": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(), "phases": {}, "browserExpected": 20, "unitExpected": 9, "buildMode": "production client; existing VERCEL=1 non-standalone configuration (not packaging acceptance)"}
+EXTRAS = ["e2e/fixtures/editor-matrix-runtime.tsx", "e2e/acceptance/editor-persistence-matrix.spec.ts", "scripts/test-editor-acceptance.py", "tests/store/scene-provider-lineage.test.tsx", "e2e/acceptance/editor-lineage.spec.ts", "sessions/2026-10-13-editor-reload-lineage.md"]
+SELECTED = ["tests/classroom-interaction.spec.ts", "tests/stage-cross-tab.spec.ts", "acceptance/editor-persistence-matrix.spec.ts", "acceptance/editor-lineage.spec.ts"]
+summary = {"status": "incomplete", "source": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(), "phases": {}, "browserExpected": 23, "unitExpected": 15, "buildMode": "production client; existing VERCEL=1 non-standalone configuration (not packaging acceptance)"}
 
 
 def stop(child):
@@ -106,11 +106,11 @@ try:
     (OUT / "source-hashes.json").write_text(json.dumps(manifest, indent=2) + "\n")
     summary["lockSha256"] = hashlib.sha256(lock.read_bytes()).hexdigest()
     summary["nodeVersion"] = subprocess.check_output([NODE, "--version"], text=True).strip()
-    run("unit", [NODE, str(SOURCE / "node_modules/vitest/vitest.mjs"), "run", "tests/store/richtext-ownership.test.tsx", "tests/store/richtext-scene-owner.test.tsx", "--reporter=json", "--reporter=junit", "--outputFile.json=" + str(OUT / "unit.json"), "--outputFile.junit=" + str(OUT / "unit.xml")], 90)
+    run("unit", [NODE, str(SOURCE / "node_modules/vitest/vitest.mjs"), "run", "tests/store/richtext-ownership.test.tsx", "tests/store/richtext-scene-owner.test.tsx", "tests/store/scene-provider-lineage.test.tsx", "--reporter=json", "--reporter=junit", "--outputFile.json=" + str(OUT / "unit.json"), "--outputFile.junit=" + str(OUT / "unit.xml")], 90)
     unit = json.loads((OUT / "unit.json").read_text())
-    if not unit["success"] or unit["numTotalTests"] != 9 or unit["numPassedTests"] != 9:
+    if not unit["success"] or unit["numTotalTests"] != 15 or unit["numPassedTests"] != 15:
         raise RuntimeError("Unit report count/status mismatch")
-    verify_junit(OUT / "unit.xml", 9)
+    verify_junit(OUT / "unit.xml", 15)
     run("build", [NODE, str(SOURCE / "node_modules/next/dist/bin/next"), "build", "--webpack"], 360)
     with socket.socket() as reservation:
         reservation.bind(("127.0.0.1", 0))
@@ -138,9 +138,9 @@ try:
             raise RuntimeError("Owned server readiness failed")
         run("browser", [NODE, str(SOURCE / "node_modules/@playwright/test/cli.js"), "test", "--config", str(config_path)], 600)
     browser = json.loads((OUT / "browser.json").read_text())
-    if browser.get("errors") or browser["stats"]["expected"] != 20 or any(browser["stats"][key] != 0 for key in ("unexpected", "flaky", "skipped")):
+    if browser.get("errors") or browser["stats"]["expected"] != 23 or any(browser["stats"][key] != 0 for key in ("unexpected", "flaky", "skipped")):
         raise RuntimeError("Browser report count/status mismatch")
-    verify_junit(OUT / "browser.xml", 20)
+    verify_junit(OUT / "browser.xml", 23)
     summary["status"] = "passed"
 except Exception as error:
     summary["failureType"] = type(error).__name__
