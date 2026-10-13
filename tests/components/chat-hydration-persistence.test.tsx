@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import 'fake-indexeddb/auto';
-import React, { act } from 'react';
+import React, { act, useLayoutEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { useChatSessions } from '@/components/chat/use-chat-sessions';
@@ -20,7 +20,10 @@ async function mountChats() {
   const root = createRoot(host);
   let current!: ReturnType<typeof useChatSessions>;
   function Harness() {
-    current = useChatSessions();
+    const value = useChatSessions();
+    useLayoutEffect(() => {
+      current = value;
+    }, [value]);
     return null;
   }
   await act(async () => root.render(<Harness />));
